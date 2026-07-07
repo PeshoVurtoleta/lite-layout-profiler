@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lite-layout-profiler 1.0.0 -- forced-reflow detector</title>
+<style>
+  :root {
+    --bg:        #05100a; --bg: oklch(0.16 0.03 165);
+    --panel:     #0a1a10; --panel: oklch(0.21 0.035 165);
+    --grid:      #1f6f4529; --grid: oklch(0.55 0.11 165 / 0.16);
+    --ink:       #7df7c8; --ink: oklch(0.90 0.15 168);
+    --ink-dim:   #3f9c78; --ink-dim: oklch(0.68 0.09 168);
+    --ink-faint: #2a6f56; --ink-faint: oklch(0.52 0.06 168);
+    --warn:      #ffb454; --warn: oklch(0.82 0.15 68);
+    --bad:       #ff6b6b; --bad: oklch(0.68 0.18 25);
+    --good:      #7df7c8; --good: oklch(0.90 0.15 168);
+    --edge:      #2f5a4e80; --edge: oklch(0.42 0.06 168 / 0.5);
+    --r: 0.5rem;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; } html, body { margin: 0; }
+  body {
+    background: linear-gradient(transparent 0 calc(1.5rem - 1px), var(--grid) calc(1.5rem - 1px) 1.5rem),
+      linear-gradient(90deg, transparent 0 calc(1.5rem - 1px), var(--grid) calc(1.5rem - 1px) 1.5rem), var(--bg);
+    background-size: 1.5rem 1.5rem;
+    color: var(--ink); font-family: var(--mono); font-size: 0.9rem; line-height: 1.5;
+    padding: 1.5rem; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 62rem; margin: 0 auto; }
+  header { border-bottom: 1px solid var(--edge); padding-bottom: 0.9rem; margin-bottom: 1.2rem; }
+  h1 { font-size: 1.15rem; margin: 0 0 0.2rem; } h1 .v { color: var(--ink-faint); font-weight: 400; }
+  .sub { color: var(--ink-dim); font-size: 0.82rem; max-width: 48rem; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 48rem) { .cols { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--edge); border-radius: var(--r); padding: 0.9rem 1rem; margin-bottom: 1rem; }
+  .card h2 { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-faint); margin: 0 0 0.7rem; font-weight: 600; }
+  button { font: inherit; color: var(--bg); background: var(--ink); border: 1px solid var(--ink);
+    border-radius: var(--r); padding: 0.45rem 0.9rem; cursor: pointer; font-size: 0.8rem; margin: 0.25rem; }
+  @media (hover: hover) { button:hover { background: var(--ink-dim); border-color: var(--ink-dim); } }
+  .btn-bad { background: var(--bad); border-color: var(--bad); }
+  .btn-sec { background: transparent; color: var(--ink-dim); border-color: var(--edge); }
+  @media (hover: hover) { .btn-sec:hover { color: var(--ink); border-color: var(--ink-faint); background: transparent; } }
+  .counter { font-size: 2.2rem; font-weight: 700; color: var(--bad); margin: 0.3rem 0; font-variant-numeric: tabular-nums; }
+  .counter.zero { color: var(--good); }
+  .violation { font-size: 0.72rem; color: var(--ink-dim); padding: 0.4rem 0; border-bottom: 1px solid var(--edge); line-height: 1.6; }
+  .violation b { color: var(--warn); font-weight: 600; }
+  .violation .site { color: var(--ink-faint); }
+  .log { max-height: 20rem; overflow-y: auto; }
+  .example-box { width: 8rem; height: 3rem; background: var(--ink-dim); border-radius: var(--r);
+    display: flex; align-items: center; justify-content: center; font-size: 0.78rem; color: var(--bg);
+    transition: none; margin: 0.3rem 0; }
+  code { color: var(--ink); background: color-mix(in oklab, var(--ink) 10%, transparent); padding: 0 0.25rem; border-radius: 3px; }
+  .note { color: var(--ink-faint); font-size: 0.72rem; margin-top: 0.6rem; }
+  .row-toolbar { margin-top: 0.5rem; }
+  .log-placeholder { color: var(--ink-faint); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>lite-layout-profiler <span class="v">1.0.0 -- forced-reflow detector</span></h1>
+    <p class="sub">
+      Click the buttons to trigger layout thrashing patterns. The profiler patches
+      <code>offsetWidth</code>, <code>getBoundingClientRect</code>, etc. and flags
+      every read-after-write in the same synchronous task. Open DevTools console to
+      see <code>console.warn</code> with call-site attribution.
+    </p>
+  </header>
+
+  <div class="cols">
+    <div>
+      <div class="card">
+        <h2>Trigger patterns</h2>
+        <div id="target" class="example-box">target</div>
+        <p class="note">Each button runs a different read-after-write pattern against the box above.</p>
+        <div>
+          <button id="btnSingle" class="btn-bad">Single thrash</button>
+          <button id="btnLoop" class="btn-bad">Loop thrash (x10)</button>
+          <button id="btnSafe" class="btn-sec">Safe (read then write)</button>
+        </div>
+        <div class="row-toolbar">
+          <button id="btnBcr" class="btn-bad">getBoundingClientRect</button>
+          <button id="btnGcs" class="btn-bad">getComputedStyle</button>
+          <button id="btnAppend" class="btn-bad">appendChild + read</button>
+        </div>
+        <div class="row-toolbar">
+          <button id="btnReset" class="btn-sec">Reset violations</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Summary</h2>
+        <div class="counter zero" id="totalCount">0</div>
+        <div class="note">total forced reflows detected</div>
+        <div class="note" id="summaryDetail"></div>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>Violation log</h2>
+        <div class="log" id="log">
+          <span class="log-placeholder">Click a thrash button to trigger a violation...</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "@zakkster/lite-layout-profiler": "../LayoutProfiler.js"
+  }
+}
+</script>
+<script type="module">
+import { createLayoutProfiler } from '@zakkster/lite-layout-profiler';
+
+const $target = document.getElementById('target');
+const $totalCount = document.getElementById('totalCount');
+const $summaryDetail = document.getElementById('summaryDetail');
+const $log = document.getElementById('log');
+
+function updateUI() {
+    const c = profiler.violationCount;
+    $totalCount.textContent = c;
+    $totalCount.className = c === 0 ? 'counter zero' : 'counter';
+
+    const s = profiler.summary();
+    const reads = Object.entries(s.byRead).map(function (e) { return e[0] + ': ' + e[1]; }).join(', ');
+    $summaryDetail.textContent = reads ? 'by read: ' + reads : '';
+
+    let html = '';
+    const vs = profiler.violations;
+    for (let i = vs.length - 1; i >= 0; i--) {
+        const v = vs[i];
+        html += '<div class="violation">' +
+            '<b>#' + v.id + '</b> read <code>' + v.read + '</code> after <code>' + v.write + '</code>' +
+            '<br><span class="site">read: ' + v.readSite + '</span>' +
+            '<br><span class="site">write: ' + v.writeSite + '</span>' +
+            '</div>';
+    }
+    $log.innerHTML = html || '<span class="log-placeholder">No violations yet.</span>';
+}
+
+const profiler = createLayoutProfiler({
+    warnToConsole: true,
+    onViolation: function () { updateUI(); }
+});
+
+// ---- Thrash patterns ----
+
+document.getElementById('btnSingle').addEventListener('click', function () {
+    $target.style.width = (80 + Math.random() * 80) + 'px';
+    void $target.offsetWidth;  // FORCED REFLOW
+});
+
+document.getElementById('btnLoop').addEventListener('click', function () {
+    for (let i = 0; i < 10; i++) {
+        $target.style.width = (60 + i * 10) + 'px';
+        void $target.offsetHeight;  // FORCED REFLOW x10
+    }
+});
+
+document.getElementById('btnSafe').addEventListener('click', function () {
+    // Read FIRST, then write -- no forced reflow.
+    const w = $target.offsetWidth;
+    $target.style.width = (w + 10) + 'px';
+    updateUI();
+});
+
+document.getElementById('btnBcr').addEventListener('click', function () {
+    $target.style.height = (40 + Math.random() * 20) + 'px';
+    void $target.getBoundingClientRect();  // FORCED REFLOW
+});
+
+document.getElementById('btnGcs').addEventListener('click', function () {
+    $target.style.padding = Math.floor(Math.random() * 10) + 'px';
+    void getComputedStyle($target).padding;  // FORCED REFLOW
+});
+
+document.getElementById('btnAppend').addEventListener('click', function () {
+    const child = document.createElement('span');
+    child.textContent = '.';
+    $target.appendChild(child);
+    void $target.offsetHeight;  // FORCED REFLOW
+    child.remove();
+});
+
+document.getElementById('btnReset').addEventListener('click', function () {
+    profiler.reset();
+    updateUI();
+});
+</script>
+</body>
+</html>

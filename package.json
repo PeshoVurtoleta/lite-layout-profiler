@@ -1,0 +1,65 @@
+{
+  "name": "@zakkster/lite-layout-profiler",
+  "version": "1.0.0",
+  "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
+  "description": "Dev-mode forced-reflow detector. Patches layout-triggering getters, tracks DOM writes, flags read-after-write within the same task, attributes to call site. The #1 silent frame killer, made visible.",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./LayoutProfiler.js",
+  "module": "./LayoutProfiler.js",
+  "types": "./LayoutProfiler.d.ts",
+  "exports": {
+    ".": {
+      "types": "./LayoutProfiler.d.ts",
+      "node": "./LayoutProfiler.js",
+      "import": "./LayoutProfiler.js",
+      "default": "./LayoutProfiler.js"
+    }
+  },
+  "files": [
+    "LayoutProfiler.js",
+    "LayoutProfiler.d.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "llms.txt",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "happy-dom": "^15.11.7"
+  },
+  "keywords": [
+    "layout-thrashing",
+    "forced-reflow",
+    "reflow",
+    "layout",
+    "profiler",
+    "performance",
+    "dom",
+    "devtools",
+    "frame-killer",
+    "lite"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/PeshoVurtoleta/lite-layout-profiler#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PeshoVurtoleta/lite-layout-profiler.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PeshoVurtoleta/lite-layout-profiler/issues",
+    "email": "shinikchiev@yahoo.com"
+  },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/PeshoVurtoleta"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

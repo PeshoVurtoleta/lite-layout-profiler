@@ -1,0 +1,49 @@
+# @zakkster/lite-layout-profiler
+
+Dev-mode forced-reflow detector for DOM-binding code.
+
+## What it does
+
+Patches layout-triggering reads (offsetWidth, getBoundingClientRect,
+getComputedStyle, SVGGraphicsElement.getBBox / getCTM / getScreenCTM,
+scrollIntoView / scrollTo / scrollBy on Element and window, window
+innerWidth / innerHeight / scrollX / scrollY / pageXOffset / pageYOffset)
+and DOM write methods (style.setProperty, every per-property style
+setter on CSSStyleDeclaration.prototype, className, appendChild,
+innerHTML, etc.). Flags read-after-write within the same synchronous
+task as a forced reflow violation.
+
+Per-property style setters (`style.width = 'X'` etc.) are patched
+separately from `setProperty()` because in real browsers the WebIDL
+per-property setters call C++ internals directly, bypassing the JS
+`setProperty` method.
+
+Stack attribution requires unminified code or sourcemaps for readable
+readSite / writeSite. Set captureStacks: false to skip stack capture
+in busy environments.
+
+## API
+
+createLayoutProfiler(options?) -- start detecting.
+  options: maxViolations, onViolation, captureStacks, warnToConsole, ignorePatterns.
+
+profiler.violations -- array of Violation objects.
+profiler.violationCount -- total count.
+profiler.summary() -- aggregate by read/write source.
+profiler.destroy() -- unpatch all prototypes.
+profiler.reset() -- clear violations, keep active.
+
+## Violation shape
+
+{ id, read, write, readSite, writeSite, readStack, writeStack, timestamp }
+
+## Detection mechanism
+
+Write sets a dirty flag with queueMicrotask auto-clear.
+Read while dirty = forced reflow. Flag clears after first read
+(layout was recalculated). Next write re-dirties.
+
+## Dev-mode only
+
+Patches prototypes. Allocates per violation (Error.stack).
+NOT zero-GC. Ship behind __DEV__ flag or strip in production.
