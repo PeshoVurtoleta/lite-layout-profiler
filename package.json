@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-layout-profiler",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
   "description": "Dev-mode forced-reflow detector. Patches layout-triggering getters, tracks DOM writes, flags read-after-write within the same task, attributes to call site. The #1 silent frame killer, made visible.",
   "type": "module",
@@ -22,11 +22,12 @@
     "README.md",
     "CHANGELOG.md",
     "COOKBOOK.md",
+    "TORTURE.md",
     "llms.txt",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test 'test/*.test.mjs'"
+    "test": "node --test 'test/*.test.mjs' 'test/torture/*.test.mjs'"
   },
   "devDependencies": {
     "happy-dom": "^15.11.7"

@@ -55,6 +55,20 @@ export interface CostSummary {
     p99Ms: number | null;
 }
 
+/** What the patch net actually covers on this host. */
+export interface PatchCoverage {
+    /** Targets successfully instrumented. */
+    applied: number;
+    /** Targets present but refusing to be patched. Any failure is a hole. */
+    failed: number;
+    /** Targets absent from this host. Not a hole: nothing can flow through them. */
+    skipped: number;
+    /** False when at least one present target could not be instrumented. */
+    complete: boolean;
+    /** Up to 20 labels naming what failed. */
+    failures: string[];
+}
+
 export interface ViolationSummary {
     /** Exact number of reflows recorded, even if storage was capped. */
     total: number;
@@ -68,13 +82,14 @@ export interface ViolationSummary {
     byWrite: Record<string, number>;
     byTask: Record<string, number>;
     taskCount: number;
+    patched: PatchCoverage;
     cost: CostSummary;
     /** Snapshot of retained records. Serialisable; consumed by the gate. */
     records: ViolationRecord[];
 }
 
 export interface LayoutProfilerOptions {
-    /** Max retained records. Default 200. */
+    /** Max retained records. Integer 1..1000000. Default 200. */
     maxStored?: number;
     /** @deprecated Pre-1.1 name for `maxStored`. Still honoured. */
     maxViolations?: number;

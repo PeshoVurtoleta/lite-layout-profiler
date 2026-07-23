@@ -299,6 +299,29 @@ function requireStringList(name, value) {
     }
 }
 
+/**
+ * A cost is a measurement only if it is a finite, non-negative number.
+ *
+ * `typeof NaN === 'number'` is the trap here: NaN compares false against every
+ * limit, so treating it as measured would let a corrupted or hostile report
+ * pass any cost budget in silence. Infinity and negatives (a non-monotonic
+ * clock) are rejected for the same reason -- they are not durations.
+ */
+function isMeasuredCost(v) {
+    return typeof v === 'number' && isFinite(v) && v >= 0;
+}
+
+// The structural fields any per-record rule needs to exist before it can
+// reason about a record at all.
+function recordIsWellFormed(rec) {
+    return rec !== null && typeof rec === 'object' && !Array.isArray(rec) &&
+        typeof rec.read === 'string' &&
+        typeof rec.write === 'string' &&
+        typeof rec.readSite === 'string' &&
+        typeof rec.writeSite === 'string' &&
+        typeof rec.taskId === 'number' && isFinite(rec.taskId);
+}
+
 // A read name with any trailing "()" removed, so `allowReads` accepts both
 // 'getBoundingClientRect' and 'getBoundingClientRect()'.
 function bareRead(name) {
@@ -381,7 +404,20 @@ export function checkNoReflow(summary, rules) {
             (summary === null ? 'null' : typeof summary) + '.'
         );
     }
-    var r = rules || {};
+    if (rules !== undefined && rules !== null &&
+        (typeof rules !== 'object' || Array.isArray(rules))) {
+        throw new TypeError(
+            '[lite-layout-profiler] checkNoReflow expects a rules object, ' +
+            'received ' + (Array.isArray(rules) ? 'an array' : typeof rules) + '.'
+        );
+    }
+    // Own enumerable properties only. Validation walks Object.keys, so reading
+    // rule values through a prototype chain would apply limits that were never
+    // validated -- Object.create({ maxReflows: -5 }) would sail straight past.
+    var r = Object.create(null);
+    var given = rules || {};
+    var gk = Object.keys(given);
+    for (var gi = 0; gi < gk.length; gi++) r[gk[gi]] = given[gk[gi]];
     validateRules(r);
 
     var maxReflows = r.maxReflows === undefined ? 0 : r.maxReflows;
@@ -392,7 +428,10 @@ export function checkNoReflow(summary, rules) {
     var allowWrites = r.allowWrites || [];
     var ignoreSites = r.ignoreSites || [];
 
-    var total = typeof summary.total === 'number' ? summary.total : 0;
+    var total = summary.total;
+    var totalUsable = typeof total === 'number' && isFinite(total) &&
+        total >= 0 && Math.floor(total) === total;
+    if (!totalUsable) total = 0;
 
     var out = {
         ok: true,
@@ -404,6 +443,31 @@ export function checkNoReflow(summary, rules) {
         cost: null,
         violations: []
     };
+
+    // Coverage is checked before anything else, because it invalidates every
+    // rule at once rather than one of them. A read that was never patched
+    // cannot appear in `total`, so even the exact count is a floor and not a
+    // number. Absent `patched` means a pre-1.2 summary, which is gated as
+    // before rather than failed for lacking a field its build never emitted.
+    var patched = summary.patched;
+    if (patched && typeof patched === 'object' && patched.complete === false) {
+        unverifiable(out, 'patched',
+            patched.failed + ' of ' + (patched.applied + patched.failed) + ' failed',
+            'The profiler could not instrument ' + patched.failed + ' target' +
+            (patched.failed === 1 ? '' : 's') +
+            ' on this host, so reflows through those paths were never seen' +
+            (patched.failures && patched.failures.length
+                ? ' (' + patched.failures.slice(0, 3).join(', ') +
+                  (patched.failures.length > 3 ? ', ...' : '') + ')'
+                : '') +
+            '. A count taken through a torn net is a floor, not a total.');
+    }
+
+    if (!totalUsable) {
+        unverifiable(out, 'total', String(summary.total),
+            'summary.total is not a count. A verdict needs an exact number of ' +
+            'reflows to reason from; this summary does not carry one.');
+    }
 
     var needsCost = maxCostMs !== Infinity || maxTotalCostMs !== Infinity;
     var hasAllowlist =
@@ -417,6 +481,26 @@ export function checkNoReflow(summary, rules) {
         unverifiable(out, 'records', 'absent',
             'Rules requiring per-record data were set, but the summary ' +
             'carries no `records` array (summary from a pre-1.1 build?).');
+    }
+    if (needsRecords && records !== null) {
+        var malformed = 0;
+        for (var mi = 0; mi < records.length; mi++) {
+            if (!recordIsWellFormed(records[mi])) malformed++;
+        }
+        if (malformed > 0) {
+            unverifiable(out, 'records', malformed + ' malformed',
+                malformed + ' of ' + records.length + ' records are missing ' +
+                'fields the requested rules read. A partially-readable record ' +
+                'set cannot be counted over.');
+        } else if (totalUsable && records.length > total) {
+            // More records than the run claims to have produced. One of the
+            // two numbers is wrong and there is no way to tell which.
+            unverifiable(out, 'records',
+                records.length + ' > ' + total,
+                'summary carries more records (' + records.length + ') than ' +
+                'its own total (' + total + '). The report is internally ' +
+                'inconsistent and cannot be gated.');
+        }
     }
     if (needsRecords && summary.truncated === true) {
         unverifiable(out, 'records',
@@ -466,6 +550,7 @@ export function checkNoReflow(summary, rules) {
             else { out.excluded++; out.excludedBy[why]++; }
         }
         out.counted = total - out.excluded;
+        if (out.counted < 0) out.counted = 0;
     }
 
     // -- Rule evaluation --
@@ -516,7 +601,7 @@ export function checkNoReflow(summary, rules) {
         var totalMs = 0, maxMs = 0, worstSite = '';
         for (var c = 0; c < kept.length; c++) {
             var cost = kept[c].costMs;
-            if (typeof cost !== 'number') { unmeasured++; continue; }
+            if (!isMeasuredCost(cost)) { unmeasured++; continue; }
             measured++;
             totalMs += cost;
             if (cost > maxMs) { maxMs = cost; worstSite = kept[c].readSite; }
@@ -588,9 +673,30 @@ export function assertNoReflow(summary, rules) {
 // createLayoutProfiler -- the public API
 // ---------------------------------------------------------------------------
 
+// Upper bound on the record ring. Past this, a cap is not a diagnostic
+// choice; it is a mistyped number.
+const MAX_STORED = 1000000;
+
+function resolveCap(opts) {
+    var raw, name;
+    if (opts.maxStored !== undefined) { raw = opts.maxStored; name = 'maxStored'; }
+    else if (opts.maxViolations !== undefined) { raw = opts.maxViolations; name = 'maxViolations'; }
+    else return 200;
+
+    if (typeof raw !== 'number' || !isFinite(raw) ||
+        Math.floor(raw) !== raw || raw < 1 || raw > MAX_STORED) {
+        throw new TypeError(
+            '[lite-layout-profiler] `' + name + '` must be an integer between 1 and ' +
+            MAX_STORED + ', received ' +
+            (typeof raw === 'number' ? String(raw) : typeof raw) + '.'
+        );
+    }
+    return raw;
+}
+
 /**
  * @param {object} [options]
- * @param {number} [options.maxViolations=200]
+ * @param {number} [options.maxStored=200]
  *   Cap on stored violations. Older violations are dropped when full.
  * @param {(v: Violation) => void} [options.onViolation]
  *   Called on each forced reflow. Receives the violation object.
@@ -614,6 +720,8 @@ export function createLayoutProfiler(options) {
             summary: function () {
                 return {
                     total: 0, stored: 0, truncated: false, stacks: false,
+                    patched: { applied: 0, failed: 0, skipped: 0, complete: false,
+                        failures: ['no DOM in this environment'] },
                     byRead: {}, byWrite: {}, byTask: {}, taskCount: 0,
                     cost: {
                         resolutionMs: null, measured: 0, unmeasured: 0,
@@ -630,14 +738,24 @@ export function createLayoutProfiler(options) {
     // which collides head-on with the gate rule of the same name meaning the
     // opposite thing (a budget of zero, not a buffer of 200). Both are accepted;
     // maxStored is the name going forward.
-    var maxViolations = opts.maxStored || opts.maxViolations || 200;
-    var onViolation = opts.onViolation || null;
+    //
+    // Validated rather than coerced. `maxStored: 0` under a `||` chain silently
+    // becomes 200, a fractional cap makes `new Array()` throw, and an
+    // astronomical one buys a dictionary-mode array nobody asked for. Each of
+    // those is a typo, and a typo in a diagnostic tool should say so.
+    var maxViolations = resolveCap(opts);
+    var onViolation = typeof opts.onViolation === 'function' ? opts.onViolation : null;
     var captureStacks = opts.captureStacks !== false;
     var measureCost = opts.measureCost !== false;
     // Monotonic millisecond clock. Defaults to performance.now(). Overridable
     // for environments without it, and so tests can drive a clock with known
     // granularity instead of hoping the host's happens to be coarse.
-    var clk = typeof opts.clock === 'function' ? opts.clock : clock;
+    //
+    // Only adopted when the cost lane is on: `clock` exists to serve cost
+    // measurement, so with `measureCost: false` there is nothing for it to do,
+    // and a caller who has switched timing off should not still be exposed to
+    // a clock that throws.
+    var clk = (measureCost && typeof opts.clock === 'function') ? opts.clock : clock;
     var warnToConsole = opts.warnToConsole !== false;
     var ignorePatterns = opts.ignorePatterns || [];
 
@@ -744,7 +862,7 @@ export function createLayoutProfiler(options) {
         // two ticks up does the measurement carry a positive lower bound.
         var below = false;
         var costMs = null;
-        if (resolutionMs !== null) {
+        if (resolutionMs !== null && isMeasuredCost(elapsedMs)) {
             if (elapsedMs > resolutionMs) costMs = elapsedMs;
             else below = true;
         }
@@ -766,6 +884,18 @@ export function createLayoutProfiler(options) {
 
         pushRecord(v);
 
+        // Clear before any user code runs, not after.
+        //
+        // The layout HAS been recalculated by this point, so the flag is stale
+        // either way -- but the ordering is what makes reentrancy safe. A
+        // callback that reads a layout property would otherwise see the flag
+        // still set, record a violation of its own, and call itself: unbounded
+        // recursion triggered by nothing worse than a debug overlay. A callback
+        // that throws would strand the flag and turn every later read in the
+        // task into a phantom violation. Both disappear if the profiler
+        // finishes its own bookkeeping before handing control away.
+        dirty = null;
+
         if (onViolation !== null) onViolation(v);
         if (warnToConsole) {
             console.warn(
@@ -779,10 +909,6 @@ export function createLayoutProfiler(options) {
             );
         }
 
-        // After the forced reflow, layout IS recalculated. Subsequent
-        // reads (without intervening writes) are cheap. Clear dirty so
-        // we don't flag the same reflow multiple times.
-        dirty = null;
     }
 
     // Wrap a zero-argument layout getter so the stall inside it is timed.
@@ -816,72 +942,131 @@ export function createLayoutProfiler(options) {
 
     var patches = [];
 
+    // Patch coverage. A host can refuse to be patched -- frozen prototypes,
+    // non-configurable descriptors, a hardened environment -- and a detector
+    // with holes in its net reports zero reflows for the same reason a working
+    // one does. Counting what actually landed is what lets the gate tell those
+    // two zeroes apart.
+    var patchApplied = 0;
+    var patchFailed = 0;
+    var patchSkipped = 0;
+    var patchFailures = [];
+
+    // Three outcomes, and the middle one is why this is not a boolean.
+    //
+    //   true       instrumented
+    //   'absent'   nothing here to instrument -- no DOMTokenList, no SVG, an
+    //              older engine. Not a hole: nothing can flow through a path
+    //              the host does not have.
+    //   false      present and refused -- frozen, non-configurable. A real
+    //              hole: reflows can travel this path unseen.
+    //
+    // Collapsing 'absent' into false would make every minimal host look torn,
+    // which is how a coverage check turns into noise everyone learns to ignore.
+    function attempt(label, fn) {
+        var r;
+        try { r = fn(); } catch (e) { r = false; }
+        if (r === 'absent') { patchSkipped++; return false; }
+        if (r === false) {
+            patchFailed++;
+            if (patchFailures.length < 20) patchFailures.push(label);
+            return false;
+        }
+        patchApplied++;
+        return true;
+    }
+
     // Patch a method: wrap it to call markDirty before the original.
     function patchMethod(proto, name, source) {
         var original = proto[name];
-        if (typeof original !== 'function') return;
-        proto[name] = function () {
+        if (typeof original !== 'function') return 'absent';
+        var desc = Object.getOwnPropertyDescriptor(proto, name);
+        if (desc && !desc.configurable && !desc.writable) return false;
+        var wrapper = function () {
             markDirty(source + '.' + name + '()');
             return original.apply(this, arguments);
         };
-        patches.push(function () { proto[name] = original; });
+        proto[name] = wrapper;
+        // Restore only what is still ours. If another instrumenter patched on
+        // top of us, its wrapper is what sits there now, and blindly writing
+        // back our saved original would silently delete their patch.
+        patches.push(function () {
+            if (proto[name] === wrapper) proto[name] = original;
+        });
+        return true;
     }
 
     // Patch a setter: wrap set to call markDirty, keep get unchanged.
     function patchSetter(proto, name, source) {
         var desc = Object.getOwnPropertyDescriptor(proto, name);
-        if (!desc || !desc.set) return;
+        if (!desc || !desc.set) return 'absent';
+        if (!desc.configurable) return false;
         var originalSet = desc.set;
         var originalGet = desc.get;
+        var wrapSet = function (v) {
+            markDirty(source + '.' + name + ' =');
+            return originalSet.call(this, v);
+        };
         Object.defineProperty(proto, name, {
             get: originalGet,
-            set: function (v) {
-                markDirty(source + '.' + name + ' =');
-                return originalSet.call(this, v);
-            },
+            set: wrapSet,
             enumerable: desc.enumerable,
             configurable: true
         });
         patches.push(function () {
-            Object.defineProperty(proto, name, desc);
+            var cur = Object.getOwnPropertyDescriptor(proto, name);
+            if (cur && cur.set === wrapSet) Object.defineProperty(proto, name, desc);
         });
+        return true;
     }
 
     // Patch a getter to call onRead when dirty.
     function patchGetter(proto, name) {
         var desc = Object.getOwnPropertyDescriptor(proto, name);
-        if (!desc || !desc.get) return;
+        if (!desc || !desc.get) return 'absent';
+        if (!desc.configurable) return false;
         var originalGet = desc.get;
         var originalSet = desc.set;
+        var wrapGet = measuredGet(originalGet, name);
         var newDesc = {
-            get: measuredGet(originalGet, name),
+            get: wrapGet,
             enumerable: desc.enumerable,
             configurable: true
         };
         if (originalSet) newDesc.set = originalSet;
         Object.defineProperty(proto, name, newDesc);
         patches.push(function () {
-            Object.defineProperty(proto, name, desc);
+            var cur = Object.getOwnPropertyDescriptor(proto, name);
+            if (cur && cur.get === wrapGet) Object.defineProperty(proto, name, desc);
         });
+        return true;
     }
 
     // Patch getBoundingClientRect.
     function patchBCR() {
         var original = Element.prototype.getBoundingClientRect;
-        Element.prototype.getBoundingClientRect =
-            measuredCall(original, 'getBoundingClientRect()');
+        if (typeof original !== 'function') return 'absent';
+        var wrapBcr = measuredCall(original, 'getBoundingClientRect()');
+        Element.prototype.getBoundingClientRect = wrapBcr;
         patches.push(function () {
-            Element.prototype.getBoundingClientRect = original;
+            if (Element.prototype.getBoundingClientRect === wrapBcr) {
+                Element.prototype.getBoundingClientRect = original;
+            }
         });
+        return true;
     }
 
     // Patch getComputedStyle.
     function patchGCS() {
-        if (typeof window === 'undefined') return;
+        if (typeof window === 'undefined') return 'absent';
         var original = window.getComputedStyle;
-        if (!original) return;
-        window.getComputedStyle = measuredCall(original, 'getComputedStyle()', window);
-        patches.push(function () { window.getComputedStyle = original; });
+        if (typeof original !== 'function') return 'absent';
+        var wrapGcs = measuredCall(original, 'getComputedStyle()', window);
+        window.getComputedStyle = wrapGcs;
+        patches.push(function () {
+            if (window.getComputedStyle === wrapGcs) window.getComputedStyle = original;
+        });
+        return true;
     }
 
     // Patch SVG layout-triggering reads. Anything measured against the SVG
@@ -889,17 +1074,21 @@ export function createLayoutProfiler(options) {
     // Essential for reactive charting / dataviz code that reads geometry to
     // position tooltips or hit-test paths.
     function patchSvgReads() {
-        if (typeof SVGGraphicsElement === 'undefined') return;
+        if (typeof SVGGraphicsElement === 'undefined') return 'absent';
         var proto = SVGGraphicsElement.prototype;
         var names = ['getBBox', 'getCTM', 'getScreenCTM'];
         for (var i = 0; i < names.length; i++) {
             (function (name) {
                 var original = proto[name];
                 if (typeof original !== 'function') return;
-                proto[name] = measuredCall(original, name + '()');
-                patches.push(function () { proto[name] = original; });
+                var w = measuredCall(original, name + '()');
+                proto[name] = w;
+                patches.push(function () {
+                    if (proto[name] === w) proto[name] = original;
+                });
             }(names[i]));
         }
+        return true;
     }
 
     // Patch scroll-positioning methods. These are hybrid: they mutate scroll
@@ -924,10 +1113,14 @@ export function createLayoutProfiler(options) {
             (function (obj, name) {
                 var original = obj[name];
                 if (typeof original !== 'function') return;
-                obj[name] = measuredCall(original, name + '()');
-                patches.push(function () { obj[name] = original; });
+                var w = measuredCall(original, name + '()');
+                obj[name] = w;
+                patches.push(function () {
+                    if (obj[name] === w) obj[name] = original;
+                });
             }(targets[i][0], targets[i][1]));
         }
+        return true;
     }
 
     // Patch window-level metric getters. scrollY / scrollX / pageOffset can
@@ -936,7 +1129,7 @@ export function createLayoutProfiler(options) {
     // defensively since legacy UI libraries substitute them for the
     // documentElement.clientWidth idiom.
     function patchWindowMetrics() {
-        if (typeof window === 'undefined') return;
+        if (typeof window === 'undefined') return 'absent';
         var names = ['innerWidth', 'innerHeight', 'scrollX', 'scrollY', 'pageXOffset', 'pageYOffset'];
         for (var i = 0; i < names.length; i++) {
             (function (name) {
@@ -953,17 +1146,20 @@ export function createLayoutProfiler(options) {
                 }
                 if (!desc || typeof desc.get !== 'function' || !desc.configurable) return;
                 var originalGet = desc.get;
+                var wm = measuredGet(originalGet, name);
                 Object.defineProperty(target, name, {
-                    get: measuredGet(originalGet, name),
+                    get: wm,
                     set: desc.set,
                     enumerable: desc.enumerable,
                     configurable: true
                 });
                 patches.push(function () {
-                    Object.defineProperty(target, name, desc);
+                    var cur = Object.getOwnPropertyDescriptor(target, name);
+                    if (cur && cur.get === wm) Object.defineProperty(target, name, desc);
                 });
             }(names[i]));
         }
+        return true;
     }
 
     // Patch every per-property setter on CSSStyleDeclaration.prototype so we
@@ -981,68 +1177,91 @@ export function createLayoutProfiler(options) {
     // keep the closure count sane -- CSSStyleDeclaration.prototype has
     // ~400 property setters.
     function patchAllCssSetters() {
-        if (typeof CSSStyleDeclaration === 'undefined') return;
+        if (typeof CSSStyleDeclaration === 'undefined') return 'absent';
         var proto = CSSStyleDeclaration.prototype;
         var names = Object.getOwnPropertyNames(proto);
         var restored = [];
+        var candidates = 0;
         for (var i = 0; i < names.length; i++) {
             var name = names[i];
             // Skip: explicitly patched elsewhere, non-CSS accessors, or getter-only.
             if (name === 'setProperty' || name === 'removeProperty' || name === 'cssText') continue;
             var desc = Object.getOwnPropertyDescriptor(proto, name);
             if (!desc || typeof desc.set !== 'function' || typeof desc.get !== 'function') continue;
-
+            candidates++;
+            if (!desc.configurable) continue;
             (function (n, d) {
                 var originalSet = d.set;
                 var originalGet = d.get;
+                var ws = function (v) {
+                    markDirty('CSSStyleDeclaration.' + n + ' =');
+                    return originalSet.call(this, v);
+                };
                 Object.defineProperty(proto, n, {
                     get: originalGet,
-                    set: function (v) {
-                        markDirty('CSSStyleDeclaration.' + n + ' =');
-                        return originalSet.call(this, v);
-                    },
+                    set: ws,
                     enumerable: d.enumerable,
                     configurable: true
                 });
-                restored.push({ name: n, desc: d });
+                restored.push({ name: n, desc: d, set: ws });
             }(name, desc));
         }
         patches.push(function () {
             for (var i = 0; i < restored.length; i++) {
-                Object.defineProperty(proto, restored[i].name, restored[i].desc);
+                try {
+                    var cur = Object.getOwnPropertyDescriptor(proto, restored[i].name);
+                    if (cur && cur.set === restored[i].set) {
+                        Object.defineProperty(proto, restored[i].name, restored[i].desc);
+                    }
+                } catch (e) { void e; }
             }
         });
+        if (candidates === 0) return 'absent';
+        return restored.length > 0;
     }
 
     // -- Apply all patches --
 
+    // Every attempt below is guarded. A host that refuses one patch must not
+    // take the whole profiler down with it -- but the refusal is counted, and
+    // an incomplete net is reported to the gate as unverifiable rather than
+    // being allowed to masquerade as a clean run.
+
     // 1. Write-side: mark dirty on DOM mutations.
     var writeTargets = buildWriteTargets();
     for (var wi = 0; wi < writeTargets.length; wi++) {
-        var wt = writeTargets[wi];
-        var srcName = (wt[0].constructor && wt[0].constructor.name) || 'DOM';
-        if (wt[2] === 'method') patchMethod(wt[0], wt[1], srcName);
-        else if (wt[2] === 'setter') patchSetter(wt[0], wt[1], srcName);
+        (function (wt) {
+            var srcName = (wt[0].constructor && wt[0].constructor.name) || 'DOM';
+            attempt(srcName + '.' + wt[1], function () {
+                return wt[2] === 'method'
+                    ? patchMethod(wt[0], wt[1], srcName)
+                    : patchSetter(wt[0], wt[1], srcName);
+            });
+        }(writeTargets[wi]));
     }
 
     // 2. Write-side: per-property setters on CSSStyleDeclaration.prototype.
     //    Catches `el.style.width = X` etc. in real browsers.
-    patchAllCssSetters();
+    attempt('CSSStyleDeclaration.<per-property setters>', patchAllCssSetters);
 
     // 3. Read-side: flag forced reflows on layout getters.
     var readProto = typeof HTMLElement !== 'undefined'
         ? HTMLElement.prototype : Element.prototype;
     for (var gi = 0; gi < ELEMENT_GETTERS.length; gi++) {
-        patchGetter(readProto, ELEMENT_GETTERS[gi]);
+        (function (n) {
+            attempt('read:' + n, function () { return patchGetter(readProto, n); });
+        }(ELEMENT_GETTERS[gi]));
     }
     for (var si = 0; si < ELEMENT_GETSET.length; si++) {
-        patchGetter(readProto, ELEMENT_GETSET[si]);
+        (function (n) {
+            attempt('read:' + n, function () { return patchGetter(readProto, n); });
+        }(ELEMENT_GETSET[si]));
     }
-    patchBCR();
-    patchGCS();
-    patchSvgReads();       // SVGGraphicsElement.getBBox / getCTM / getScreenCTM
-    patchScrollMethods();  // scrollIntoView / scrollTo / scrollBy (Element + window)
-    patchWindowMetrics();  // window.innerWidth / innerHeight / scrollX / scrollY / ...
+    attempt('read:getBoundingClientRect', patchBCR);
+    attempt('read:getComputedStyle', patchGCS);
+    attempt('read:svg', patchSvgReads);
+    attempt('read:scrollMethods', patchScrollMethods);
+    attempt('read:windowMetrics', patchWindowMetrics);
 
     // -----------------------------------------------------------------------
     // Public surface
@@ -1050,12 +1269,24 @@ export function createLayoutProfiler(options) {
 
     function destroy() {
         active = false;
-        for (var i = patches.length - 1; i >= 0; i--) patches[i]();
+        // A host can be hardened after we patched it. Deactivation must still
+        // complete, and every remaining restore must still be attempted.
+        for (var i = patches.length - 1; i >= 0; i--) {
+            try { patches[i](); } catch (e) { void e; }
+        }
         patches.length = 0;
     }
 
     function reset() {
-        for (var i = 0; i < cap; i++) ring[i] = undefined;
+        // Clear only the slots actually holding records. Walking the whole
+        // capacity would make reset cost what the ring could hold rather than
+        // what it does hold, which is the wrong bill for a large cap.
+        var start = ringCount < cap ? 0 : ringWrite;
+        for (var i = 0; i < ringCount; i++) {
+            var idx = start + i;
+            if (idx >= cap) idx -= cap;
+            ring[idx] = undefined;
+        }
         ringWrite = 0;
         ringCount = 0;
         violationsCache = null;
@@ -1084,7 +1315,7 @@ export function createLayoutProfiler(options) {
             byRead[v.read] = (byRead[v.read] || 0) + 1;
             byWrite[v.write] = (byWrite[v.write] || 0) + 1;
             byTask[v.taskId] = (byTask[v.taskId] || 0) + 1;
-            if (typeof v.costMs === 'number') {
+            if (isMeasuredCost(v.costMs)) {
                 costs.push(v.costMs);
                 totalMs += v.costMs;
                 if (v.costMs > maxMs) maxMs = v.costMs;
@@ -1119,6 +1350,16 @@ export function createLayoutProfiler(options) {
         return {
             total: violationCount,
             stored: ringCount,
+            // What the patch net actually covers. `complete: false` means at
+            // least one read or write went uninstrumented, so a zero here is
+            // not evidence of anything.
+            patched: {
+                applied: patchApplied,
+                failed: patchFailed,
+                skipped: patchSkipped,
+                complete: patchFailed === 0,
+                failures: patchFailures.slice()
+            },
             // Set once the storage cap has dropped records. Any gate rule that
             // needs per-record data refuses to evaluate against a torn set.
             truncated: violationCount > ringCount,

@@ -33,9 +33,11 @@ cost   (1.2) -- time each stall; null when below the clock's granularity.
 ## API
 
 createLayoutProfiler(options?) -- start detecting.
-  options: maxStored (default 200; maxViolations is the deprecated
-  pre-1.1 name for it), onViolation, captureStacks, warnToConsole,
-  ignorePatterns, measureCost (default true), clock.
+  options: maxStored (integer 1..1000000, default 200; maxViolations is
+  the deprecated pre-1.1 name for it), onViolation, captureStacks,
+  warnToConsole, ignorePatterns, measureCost (default true), clock.
+  Invalid maxStored throws TypeError rather than being coerced.
+  clock is only adopted when measureCost is on.
 
 profiler.violations -- chronological snapshot of retained records, with stacks.
 profiler.violationCount -- exact total, even if the store was capped.
@@ -65,6 +67,7 @@ unmeasurable. belowGranularity distinguishes "too fast to time" from
 ## Summary shape
 
 { total, stored, truncated, stacks, byRead, byWrite, byTask, taskCount,
+  patched: { applied, failed, skipped, complete, failures },
   cost: { resolutionMs, measured, unmeasured, totalMs, maxMs, avgMs, p99Ms },
   records: [ lean records without stacks ] }
 
@@ -94,6 +97,7 @@ Every rule declares the evidence it needs. If the summary cannot supply
 it, the rule fails as unverifiable rather than passing, and verified
 goes false.
 
+  (every rule)                needs a complete net      fails if patched.complete === false
   maxReflows                  needs summary.total       never unverifiable
   maxPerTask                  needs complete records    fails if truncated
   allowReads / allowWrites    needs complete records    fails if truncated
@@ -160,9 +164,38 @@ Patches prototypes. Allocates per violation (record object, and
 Error.stack when captureStacks is on). NOT zero-GC. Ship behind a
 __DEV__ flag or strip in production.
 
+## Patch coverage
+
+This library modifies its host, so it can be refused. A frozen prototype
+or a non-configurable descriptor means a read goes uninstrumented, and a
+detector with holes reports zero for the same reason a working one does.
+
+summary().patched = { applied, failed, skipped, complete, failures }
+
+  applied  instrumented
+  skipped  absent from this host -- not a hole, nothing flows through a
+           path the host does not have
+  failed   present and refused -- a real hole
+  complete failed === 0
+
+complete: false makes every gate rule unverifiable at once.
+
+Teardown is identity-checked: a restore only fires if the current value
+is still the wrapper this profiler installed, so destroy() never deletes
+a foreign instrumenter that patched on top.
+
+## Reentrancy
+
+onViolation fires synchronously inside the offending task. The dirty flag
+is cleared BEFORE the callback runs, so a callback that reads layout does
+not trigger itself, and a callback that throws does not strand the flag.
+Treat the callback like an interrupt handler: record, do not render.
+
 ## Testing
 
-node --test 'test/*.test.mjs'
-01-detect, 02-gate, 03-gate-live, 04-cost, 05-cost-live. 100 tests.
+npm test -- runs test/*.test.mjs and test/torture/*.test.mjs
+205 tests. Main: 01-detect, 02-gate, 03-gate-live, 04-cost, 05-cost-live.
+Torture: l1-5-patching, l2-5-gate-adversarial, l3-5-cost-clock,
+l99-9-extreme -- 105 scenarios across nine axes, see TORTURE.md.
 The live suites drive the real patcher against a stub DOM with an
 injected clock, so timer-resolution behaviour is deterministic.

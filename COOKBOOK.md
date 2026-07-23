@@ -14,9 +14,10 @@ Recipes are graded in four tiers:
   animation code, third-party libraries, headless runs, shipping a
   summary out of the browser, keeping the profiler out of its own
   numbers.
-- **Pro (12-15)** -- what to do when a cost budget will not survive a
-  different browser, gating a run you could only partly record, and
-  wiring the two profilers into one CI vocabulary.
+- **Pro (12-17)** -- what to do when a cost budget will not survive a
+  different browser, gating a run you could only partly record, wiring
+  the two profilers into one CI vocabulary, proving the detector was
+  watching at all, and sharing prototypes with another instrumenter.
 
 Read them in order if you are new; jump around if you know what you are
 looking for.
@@ -60,6 +61,8 @@ violation; it is a diagnostic tool, not a runtime dependency.
 13. [Pro: gating a run you could only partly record](#recipe-13-pro-gating-a-run-you-could-only-partly-record)
 14. [Pro: the CI-counting configuration](#recipe-14-pro-the-ci-counting-configuration)
 15. [Pro: one vocabulary with lite-gc-profiler](#recipe-15-pro-one-vocabulary-with-lite-gc-profiler)
+16. [Pro: proving the detector was actually watching](#recipe-16-pro-proving-the-detector-was-actually-watching)
+17. [Pro: living with another instrumenter](#recipe-17-pro-living-with-another-instrumenter)
 
 ---
 
@@ -97,6 +100,7 @@ verified from the data it was handed **fails**; it never passes.
 
 | rule | needs | unverifiable when |
 | --- | --- | --- |
+| *(all rules)* | a complete patch net | `patched.complete` is false |
 | `maxReflows` | `summary.total` | never -- the count is exact |
 | `maxPerTask` | complete records | records truncated or absent |
 | `allowReads` / `allowWrites` | complete records | records truncated or absent |
@@ -736,6 +740,92 @@ work exactly as before; `ignoreSites`, `maxCostMs` and
   larger of the two savings by a wide margin.
 
 ---
+
+## Recipe 16: Pro: proving the detector was actually watching
+
+**Goal.** Tell a page that forces no layout apart from a page where the
+profiler was never allowed to look.
+
+**Primitive.** `summary().patched`.
+
+**Code.**
+
+```js
+const s = profiler.summary();
+
+if (!s.patched.complete) {
+    console.error('uninstrumented targets:', s.patched.failures);
+}
+checkNoReflow(s, { maxReflows: 0 });   // already fails when the net is torn
+```
+
+**Reading the verdict.**
+
+```js
+{ applied: 61, failed: 0, skipped: 4, complete: true, failures: [] }
+```
+
+Three numbers, and the middle one is the one people get wrong:
+
+- `applied` -- instrumented.
+- `skipped` -- **not** a hole. The host does not have this target at all
+  (no `DOMTokenList`, no `SVGGraphicsElement`, an older engine). Nothing
+  can travel a path that does not exist.
+- `failed` -- a real hole. The target is there and refused to be patched:
+  a frozen prototype, a non-configurable descriptor, a hardened page.
+  Reflows can travel this path unseen.
+
+`complete` is `failed === 0`. When it is false the gate reports every
+rule as unverifiable, not just the ones that read records -- a read that
+was never instrumented cannot appear in `total`, so even the exact count
+is a floor rather than a number.
+
+**Gotchas.**
+
+- The natural instinct is to treat `skipped` as a warning. It is not. If
+  `skipped` counted against you, every environment simpler than a full
+  browser would look broken, and a coverage check that cries wolf is one
+  nobody reads.
+- `Object.freeze` on `Element.prototype` is the usual cause of `failed`
+  in the wild, and it usually comes from a security hardening library
+  rather than from your own code.
+- Coverage says nothing about *foreign* instrumentation. Another tool can
+  own a target we successfully patched. Reporting that is the coverage
+  lane's remaining half, arriving in v1.4.
+
+---
+
+## Recipe 17: Pro: living with another instrumenter
+
+**Goal.** Share prototypes with Zone.js, a framework devtool, or a second
+copy of this library without either side corrupting the other.
+
+**Primitive.** identity-checked teardown, and ordering discipline.
+
+**Code.**
+
+```js
+const profiler = createLayoutProfiler();
+// ... another tool patches on top of us ...
+profiler.destroy();   // declines to touch what it no longer owns
+```
+
+**Reading the verdict.** Every restore this library performs checks that
+the value currently installed is still the wrapper it put there. If
+something else patched on top, the restore is skipped rather than writing
+a stale original over the newer patch and deleting it.
+
+**Gotchas.**
+
+- The safe order is LIFO: destroy the most recently created profiler
+  first. Out of order, the older profiler correctly declines to unpatch,
+  which means its own wrapper stays installed for the life of the page.
+  It is inert -- an inactive profiler passes reads straight through -- but
+  it is not free.
+- One profiler at a time is still the rule. The identity check makes
+  sharing *safe*, not *tidy*.
+- If another tool patches the same getter and does **not** do this check,
+  its teardown will delete ours. Nothing on this side can prevent that.
 
 ## Recipe 15: Pro: one vocabulary with lite-gc-profiler
 

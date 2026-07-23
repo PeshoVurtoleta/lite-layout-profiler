@@ -153,6 +153,13 @@ the rule **fails as unverifiable** rather than passing on incomplete data, and
 | `allowReads` / `allowWrites` | complete records | records truncated or absent |
 | `ignoreSites` | complete records + call sites | above, or `captureStacks: false` |
 
+An incomplete patch net invalidates every rule at once rather than one of
+them: a read that was never instrumented cannot appear in `total`, so even the
+exact count is a floor and not a number. `summary().patched` reports
+`{ applied, failed, skipped, complete, failures }`, where `skipped` means a
+target this host does not have (not a hole) and `failed` means a target that
+refused to be patched (a hole).
+
 Zero counted reflows through a torn record set is not a clean run. If the
 storage cap dropped records, any rule that reasons about individual records
 refuses to evaluate -- but `maxReflows` still gates exactly, because `total` is

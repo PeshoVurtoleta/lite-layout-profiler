@@ -76,11 +76,70 @@ from one reflow of 12 ms, and only the second drops a frame on its own.
 `maxCostMs` and `maxTotalCostMs` are deliberately separate so a run can breach
 one while passing the other.
 
+### Hardening (torture suite)
+
+A 105-scenario adversarial suite landed alongside the cost lane
+(`test/torture/`, documented in `TORTURE.md`). It found 22 defects on its
+first run, all fixed here. The ones that mattered most:
+
+- **A callback that read a layout property recursed without bound.** The
+  dirty flag was cleared *after* `onViolation` fired, so the callback's own
+  read was itself a violation, which fired the callback again. A debug overlay
+  reading `offsetWidth` was enough to blow the stack. The flag is now cleared
+  before any user code runs, which also stops a throwing callback from
+  stranding it and turning every later read in the task into a phantom.
+- **A frozen or non-configurable prototype crashed the constructor**, and
+  worse, there was no way to tell a host that refused half the patch net from
+  a page that genuinely forces no layout. Both now degrade instead of
+  throwing, and `summary().patched` reports coverage.
+- **Teardown deleted foreign patches.** Restores wrote saved originals back
+  unconditionally, so destroying this profiler removed any instrumenter that
+  had patched on top of it. Every restore is now identity-checked: the
+  profiler declines to unpatch what it no longer owns.
+- **`NaN` cost counted as a measurement.** `typeof NaN === 'number'` and NaN
+  compares false against every limit, so a corrupted report passed any cost
+  budget in silence. Infinite and negative costs had the same hole.
+- **Rule values were read through the prototype chain** while validation
+  walked own keys only, so `Object.create({ maxReflows: -5 })` applied an
+  unvalidated limit.
+- **Storage caps were coerced rather than validated.** `maxStored: 0` silently
+  became 200, `1.5` and `Infinity` threw `RangeError` out of `new Array()`.
+
+### Added
+
+- **`summary().patched`** -- `{ applied, failed, skipped, complete, failures }`.
+  A host can refuse to be patched, and a detector with holes in its net
+  reports zero reflows for the same reason a working one does. `skipped` is
+  deliberately separate from `failed`: a target absent from this host (no
+  `DOMTokenList`, no SVG) is not a hole, because nothing can flow through a
+  path the host does not have. Collapsing the two would make every minimal
+  environment look torn, which is how a coverage check becomes noise everyone
+  learns to ignore.
+- **Gate rule `patched`** -- `complete: false` makes every rule unverifiable at
+  once, not one of them. A read that was never instrumented cannot appear in
+  `total`, so even the exact count is a floor rather than a number. A summary
+  without a `patched` block is gated as before, so pre-1.2 reports still work.
+
+### Changed
+
+- **`maxStored` is validated**: an integer in `1..1000000`, or a `TypeError`
+  naming the option. `maxViolations` is validated identically.
+- **`options.clock` is only adopted when `measureCost` is on.** The clock
+  exists to serve the cost lane; with timing off there is nothing for it to
+  do, and a caller who switched timing off should not still be exposed to a
+  clock that throws.
+- **A non-function `onViolation` is ignored** rather than called.
+- **`reset()` clears the slots in use**, not the whole capacity.
+- Costs must be finite and non-negative to count as measurements, in the
+  profiler and in the gate alike.
+
 ### Testing
 
-100 tests, renumbered to the ecosystem `NN-name.test.mjs` convention:
+205 tests. 100 in the main suite, renumbered to the ecosystem
+`NN-name.test.mjs` convention:
 `01-detect`, `02-gate`, `03-gate-live`, `04-cost`, `05-cost-live`.
-`npm test` now runs `node --test 'test/*.test.mjs'`.
+Plus 105 torture scenarios in `test/torture/` across nine axes; see
+`TORTURE.md`. `npm test` runs both globs.
 
 The live cost suite drives the real patcher against a stub DOM with an
 injected clock, so timer-resolution behaviour is deterministic instead of
