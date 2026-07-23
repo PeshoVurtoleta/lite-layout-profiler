@@ -22,6 +22,10 @@ export interface Violation {
     readStack: string;
     /** Full stack at the write. */
     writeStack: string;
+    /** Milliseconds spent inside the forced layout, or null if unmeasurable. */
+    costMs: number | null;
+    /** True when the stall did not clear the clock's granularity. */
+    belowGranularity: boolean;
     /** Timestamp (performance.now or Date.now). */
     timestamp: number;
 }
@@ -34,7 +38,21 @@ export interface ViolationRecord {
     write: string;
     readSite: string;
     writeSite: string;
+    costMs: number | null;
+    belowGranularity: boolean;
     timestamp: number;
+}
+
+/** Cost aggregates. Every total is null, not zero, when nothing was measured. */
+export interface CostSummary {
+    /** Smallest positive delta the clock reports. Null if undeterminable. */
+    resolutionMs: number | null;
+    measured: number;
+    unmeasured: number;
+    totalMs: number | null;
+    maxMs: number | null;
+    avgMs: number | null;
+    p99Ms: number | null;
 }
 
 export interface ViolationSummary {
@@ -50,6 +68,7 @@ export interface ViolationSummary {
     byWrite: Record<string, number>;
     byTask: Record<string, number>;
     taskCount: number;
+    cost: CostSummary;
     /** Snapshot of retained records. Serialisable; consumed by the gate. */
     records: ViolationRecord[];
 }
@@ -63,6 +82,10 @@ export interface LayoutProfilerOptions {
     onViolation?: (v: Violation) => void;
     /** Capture call stacks. Default true. Set false to reduce overhead. */
     captureStacks?: boolean;
+    /** Time each forced reflow and probe the clock floor at init. Default true. */
+    measureCost?: boolean;
+    /** Monotonic millisecond clock. Defaults to performance.now(). */
+    clock?: () => number;
     /** Log console.warn per violation. Default true. */
     warnToConsole?: boolean;
     /** Stack frame substrings to drop at capture time (never recorded). */
@@ -70,7 +93,7 @@ export interface LayoutProfilerOptions {
 }
 
 export interface LayoutProfiler {
-    /** All recorded violations, with stacks. */
+    /** Retained violations with stacks, oldest first. A stable snapshot. */
     readonly violations: Violation[];
     /** Total violation count (may exceed stored if the cap was hit). */
     readonly violationCount: number;
@@ -95,6 +118,10 @@ export interface ReflowRules {
     maxReflows?: number;
     /** Max counted reflows within any one synchronous block. Default unlimited. */
     maxPerTask?: number;
+    /** Max milliseconds for the worst single forced reflow. Default unlimited. */
+    maxCostMs?: number;
+    /** Max total milliseconds across all counted reflows. Default unlimited. */
+    maxTotalCostMs?: number;
     /** Read names to exclude. Validated against READ_NAMES. Trailing `()` optional. */
     allowReads?: string[];
     /** Write sources to exclude. Prefix match. */
@@ -122,6 +149,13 @@ export interface GateReport {
     counted: number;
     excluded: number;
     excludedBy: { reads: number; writes: number; sites: number };
+    /** Cost of counted reflows. Null when the summary carried no records. */
+    cost: {
+        measured: number;
+        unmeasured: number;
+        totalMs: number | null;
+        maxMs: number | null;
+    } | null;
     violations: RuleViolation[];
 }
 

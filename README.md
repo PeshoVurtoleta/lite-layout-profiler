@@ -101,7 +101,7 @@ const report = checkNoReflow(profiler.summary(), {
 // -> { ok, verified, total, counted, excluded, excludedBy, violations }
 ```
 
-`report.violations` entries are `{ metric, limit, actual, reason }` — the same
+`report.violations` entries are `{ metric, limit, actual, reason }` -- the same
 shape `lite-gc-profiler`'s `checkNoGc` emits, so both profilers report to CI
 tooling in one vocabulary.
 
@@ -132,8 +132,8 @@ for (let i = 0; i < 50; i++) el.style.width = (w + i) + 'px';
 ### Why `maxPerTask` exists
 
 Ten reflows spread across ten frames is a different illness from ten in one
-block. Every record carries a `taskId` — the epoch of the synchronous block it
-occurred in, advanced by the microtask checkpoint that clears the dirty flag —
+block. Every record carries a `taskId` -- the epoch of the synchronous block it
+occurred in, advanced by the microtask checkpoint that clears the dirty flag --
 so the gate can name the pathology rather than just the volume:
 
 ```
@@ -148,14 +148,14 @@ the rule **fails as unverifiable** rather than passing on incomplete data, and
 
 | rule | needs | unverifiable when |
 | --- | --- | --- |
-| `maxReflows` | `summary.total` | never — the count is exact |
+| `maxReflows` | `summary.total` | never -- the count is exact |
 | `maxPerTask` | complete records | records truncated or absent |
 | `allowReads` / `allowWrites` | complete records | records truncated or absent |
 | `ignoreSites` | complete records + call sites | above, or `captureStacks: false` |
 
 Zero counted reflows through a torn record set is not a clean run. If the
 storage cap dropped records, any rule that reasons about individual records
-refuses to evaluate — but `maxReflows` still gates exactly, because `total` is
+refuses to evaluate -- but `maxReflows` still gates exactly, because `total` is
 kept independently of the storage buffer. A capped run can be gated on volume,
 just not on shape.
 
@@ -178,7 +178,7 @@ checkNoReflow(summary, { allowReads: ['offsetWidht'] });
 
 `allowReads` is validated against `READ_NAMES`, the closed vocabulary of reads
 this build instruments, derived from the same lists the patcher uses so it
-cannot drift. `allowWrites` is a prefix match — `'CSSStyleDeclaration.'` allows
+cannot drift. `allowWrites` is a prefix match -- `'CSSStyleDeclaration.'` allows
 every style write. `ignoreSites` is a substring match against either call site.
 
 ### `ignorePatterns` vs `ignoreSites`
@@ -198,21 +198,101 @@ buffer entirely.
 
 ---
 
+## Cost
+
+A count tells you a reflow happened. The cost tells you whether it mattered.
+
+Each forced read is timed across the original getter, so `costMs` is the stall
+itself and not the bookkeeping around it:
+
+```js
+const s = profiler.summary();
+
+s.cost;
+// { resolutionMs: 0.1, measured: 47, unmeasured: 3,
+//   totalMs: 62.4, maxMs: 11.2, avgMs: 1.33, p99Ms: 9.8 }
+
+checkNoReflow(s, {
+    maxReflows: 50,
+    maxCostMs: 4,          // no single reflow may stall over 4 ms
+    maxTotalCostMs: 16     // and the run may not spend a frame's worth in total
+});
+```
+
+Both budgets earn their keep separately: fifty reflows of 0.2 ms is a
+different problem from one reflow of 12 ms, and only the second one drops a
+frame on its own.
+
+### Null is not zero
+
+Browsers deliberately coarsen `performance.now()` -- a non-isolated Chrome tab
+clamps to 100us, Firefox to 1ms by default. A reflow shorter than that reads
+back as exactly `0`, which is indistinguishable from free.
+
+So the profiler probes the clock floor once at init and stores it as
+`cost.resolutionMs`. A stall that does not clear **more than one tick** is
+recorded as `costMs: null` with `belowGranularity: true`. One tick is not a
+small measurement, it is an absent one: a delta of exactly one tick means the
+true duration lies somewhere in `(0, 2 x tick)`, an interval that contains
+zero. Only from two ticks up does the number carry a positive lower bound.
+
+Every aggregate follows the same rule. With nothing measured, `totalMs`,
+`maxMs`, `avgMs` and `p99Ms` are `null`, never `0`.
+
+### Cost rules refuse to guess
+
+If any counted reflow carries no cost, `maxCostMs` and `maxTotalCostMs` fail
+as unverifiable rather than summing the nulls as zeroes -- otherwise a
+thousand sub-resolution stalls would slide under a millisecond budget:
+
+```
+cost: 3 of 50 counted reflows carry no cost, having landed below the
+0.1 ms timer resolution. Gate on counts instead, or raise the workload
+so each stall clears the clock.
+```
+
+On a coarse-clocked browser this means cost budgets simply do not apply, and
+you gate on `maxReflows` and `maxPerTask` instead. That is the correct
+outcome: you cannot pass a budget you were never able to measure.
+
+### Turning it off
+
+`measureCost: false` skips the init probe and the two clock reads per
+violation. Every `costMs` becomes `null`, so cost rules become unverifiable
+and count rules keep working:
+
+```js
+createLayoutProfiler({ captureStacks: false, measureCost: false });
+```
+
+That pair is the CI-counting configuration: no stack allocation, no timing,
+just the numbers `maxReflows` and `maxPerTask` need.
+
 ## API additions
 
-### `checkNoReflow(summary, rules?)` → `GateReport`
+### `checkNoReflow(summary, rules?)` -> `GateReport`
 
 Evaluate a recorded run against a budget. Never throws on breach; throws
 `TypeError` on a malformed rule set.
 
-### `assertNoReflow(summary, rules?)` → `GateReport`
+### `assertNoReflow(summary, rules?)` -> `GateReport`
 
 Same, throwing `ReflowBudgetError` on breach. The error carries `.report` and
 `.violations`.
 
+### Cost rules
+
+| Rule | Gates |
+| --- | --- |
+| `maxCostMs` | worst single measured stall |
+| `maxTotalCostMs` | sum of measured stalls |
+
+Both are evaluated after allowlist exclusions, and both fail as unverifiable
+if any counted reflow is unmeasured.
+
 ### `READ_NAMES`
 
-`readonly string[]` — every read name this build can emit.
+`readonly string[]` -- every read name this build can emit.
 
 ### `LayoutProfiler` additions
 
@@ -225,13 +305,17 @@ Same, throwing `ReflowBudgetError` on breach. The error carries `.report` and
 | Field | Description |
 | --- | --- |
 | `taskId` | Epoch of the synchronous block this reflow occurred in |
+| `costMs` | Milliseconds spent inside the forced layout, or `null` if unmeasurable |
+| `belowGranularity` | True when the stall did not clear the clock's granularity |
 
 ### Options
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `maxStored` | number | 200 | Cap on retained records |
-| `maxViolations` | number | 200 | **Deprecated** — pre-1.1 name for `maxStored`, still honoured |
+| `maxViolations` | number | 200 | **Deprecated** -- pre-1.1 name for `maxStored`, still honoured |
+| `measureCost` | boolean | true | Time each reflow and probe the clock floor at init |
+| `clock` | function | `performance.now` | Monotonic ms clock, for hosts without `performance` |
 
 > The rename resolves a collision: the old option name meant "a buffer of 200",
 > while the gate rule of the same name means "a budget of zero". The gate rule

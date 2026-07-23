@@ -1,0 +1,778 @@
+# Cookbook
+
+The README is a reference. It answers *what does this API do?*
+
+This is the cookbook. It answers *how do I use it for X?*
+
+Recipes are graded in four tiers:
+
+- **Start here (0)** -- you have installed the package and want to see a
+  number, before deciding anything gates.
+- **Basics (1-4)** -- your first gate, telling a thrash apart from a
+  drip, adding cost, reading a verdict.
+- **Working (5-11)** -- CI, allowlisting the reflows you meant to have,
+  animation code, third-party libraries, headless runs, shipping a
+  summary out of the browser, keeping the profiler out of its own
+  numbers.
+- **Pro (12-15)** -- what to do when a cost budget will not survive a
+  different browser, gating a run you could only partly record, and
+  wiring the two profilers into one CI vocabulary.
+
+Read them in order if you are new; jump around if you know what you are
+looking for.
+
+Each recipe has the same shape:
+
+- **Goal** -- what you are trying to prove.
+- **Primitive** -- which entry point.
+- **Code** -- the smallest correct usage.
+- **Reading the verdict** -- what each field actually means for your goal.
+- **Gotchas** -- the traps I fell in first.
+
+Everything below assumes you have run
+`npm i @zakkster/lite-layout-profiler` and that the profiler is behind a
+`__DEV__` flag. This library patches prototypes and allocates per
+violation; it is a diagnostic tool, not a runtime dependency.
+
+## Contents
+
+**Diagrams**
+
+- [The task timeline](#the-task-timeline)
+- [The evidence matrix](#the-evidence-matrix)
+- [The CI workflow](#the-ci-workflow)
+
+**Recipes**
+
+0. [Just show me a number](#recipe-0-just-show-me-a-number)
+1. [My first gate](#recipe-1-my-first-gate)
+2. [Telling a thrash apart from a drip](#recipe-2-telling-a-thrash-apart-from-a-drip)
+3. [Gating on milliseconds, not counts](#recipe-3-gating-on-milliseconds-not-counts)
+4. [Reading a verdict correctly](#recipe-4-reading-a-verdict-correctly)
+5. [Allowlisting the reflows you meant to have](#recipe-5-allowlisting-the-reflows-you-meant-to-have)
+6. [Silencing a third-party library](#recipe-6-silencing-a-third-party-library)
+7. [Gating one interaction, not the whole page](#recipe-7-gating-one-interaction-not-the-whole-page)
+8. [Running headless in CI](#recipe-8-running-headless-in-ci)
+9. [Shipping a summary out of the browser](#recipe-9-shipping-a-summary-out-of-the-browser)
+10. [Keeping the profiler out of its own numbers](#recipe-10-keeping-the-profiler-out-of-its-own-numbers)
+11. [Finding the write, not just the read](#recipe-11-finding-the-write-not-just-the-read)
+12. [Pro: cost budgets that survive a different browser](#recipe-12-pro-cost-budgets-that-survive-a-different-browser)
+13. [Pro: gating a run you could only partly record](#recipe-13-pro-gating-a-run-you-could-only-partly-record)
+14. [Pro: the CI-counting configuration](#recipe-14-pro-the-ci-counting-configuration)
+15. [Pro: one vocabulary with lite-gc-profiler](#recipe-15-pro-one-vocabulary-with-lite-gc-profiler)
+
+---
+
+## Diagrams
+
+### The task timeline
+
+A forced reflow is not a property of a line of code. It is a property of
+an *ordering* inside one synchronous block. The dirty flag is what makes
+that ordering observable.
+
+```mermaid
+%%{init: {"theme": "neutral"}}%%
+flowchart LR
+    W1[write: style.width] -- sets dirty --> R1[read: offsetWidth]
+    R1 -- FORCED REFLOW, timed --> C[layout recalculated, dirty cleared]
+    C --> W2[write: style.height]
+    W2 -- sets dirty --> R2[read: offsetHeight]
+    R2 -- FORCED REFLOW, timed --> M[microtask checkpoint]
+    M -- taskEpoch++ --> N[next task starts clean]
+    R1:::hot
+    R2:::hot
+    classDef hot fill:#c41,color:#fff,stroke:#333
+```
+
+Everything between two microtask checkpoints shares a `taskId`. That is
+the unit `maxPerTask` gates on, and it is the unit that matters: the
+browser cannot interleave paint into the middle of a synchronous block,
+so ten reflows there are ten stalls stacked into one frame.
+
+### The evidence matrix
+
+Not every rule can be checked from every run. A rule that cannot be
+verified from the data it was handed **fails**; it never passes.
+
+| rule | needs | unverifiable when |
+| --- | --- | --- |
+| `maxReflows` | `summary.total` | never -- the count is exact |
+| `maxPerTask` | complete records | records truncated or absent |
+| `allowReads` / `allowWrites` | complete records | records truncated or absent |
+| `ignoreSites` | complete records + call sites | above, or `captureStacks: false` |
+| `maxCostMs` / `maxTotalCostMs` | measured costs | any counted reflow unmeasured |
+
+`maxReflows` is the one row that survives everything, because `total` is
+kept independently of the storage ring. A capped run is gateable on
+volume, never on shape.
+
+### The CI workflow
+
+The failure path matters more than the pass path, because the failure
+path is the one that has to tell a human what to change.
+
+```mermaid
+%%{init: {"theme": "neutral"}}%%
+flowchart TD
+    S[interaction under test] --> R[record with profiler]
+    R --> J[summary -- JSON]
+    J --> C[checkNoReflow against budget]
+    C --> V{verdict}
+    V -- ok --> P[green build]
+    V -- fail --> F[reason names read, write, sites, ms]
+    V -- unverified --> U[fix the recording, not the budget]
+    U --> R
+```
+
+`verified: false` is never a reason to loosen the budget. It means the
+run could not answer the question you asked, so you change how you
+record, not what you demand.
+
+---
+
+## Recipe 0: Just show me a number
+
+**Goal.** Find out whether the page forces layout at all, before
+deciding anything.
+
+**Primitive.** `createLayoutProfiler`.
+
+**Code.**
+
+```js
+import { createLayoutProfiler } from '@zakkster/lite-layout-profiler';
+
+const profiler = createLayoutProfiler();
+
+// ... use the app for a while ...
+
+console.table(profiler.summary().byRead);
+console.log(profiler.summary().cost);
+profiler.destroy();
+```
+
+**Reading the verdict.**
+
+```js
+{
+    total: 47,          // exact count, even if the ring dropped records
+    stored: 47,         // how many are retained in full
+    truncated: false,
+    taskCount: 12,      // how many distinct synchronous blocks
+    cost: {
+        resolutionMs: 0.1,
+        measured: 44,
+        unmeasured: 3,
+        totalMs: 62.4,
+        maxMs: 11.2,
+        avgMs: 1.42,
+        p99Ms: 9.8
+    }
+}
+```
+
+`total: 47` across `taskCount: 12` is a drip. `total: 47` across
+`taskCount: 2` is a thrash. The same count means very different things,
+which is Recipe 2.
+
+**Gotchas.**
+
+- `warnToConsole` defaults to `true` and will fill the console fast on a
+  thrashing page. Turn it off once you have seen the shape.
+- `total` can exceed `stored`. The count is exact; the records are
+  capped at `maxStored` (default 200).
+
+---
+
+## Recipe 1: My first gate
+
+**Goal.** Prove that a specific interaction forces no layout at all.
+
+**Primitive.** `assertNoReflow`.
+
+**Code.**
+
+```js
+import { createLayoutProfiler, assertNoReflow } from '@zakkster/lite-layout-profiler';
+
+const profiler = createLayoutProfiler({ warnToConsole: false });
+
+await openTheDrawer();
+
+assertNoReflow(profiler.summary());   // default budget is zero
+profiler.destroy();
+```
+
+If the interaction forces no layout, this returns a report. If it forces
+any, it throws `ReflowBudgetError`:
+
+```
+[lite-layout-profiler] Reflow budget exceeded (1 rule breached):
+  - maxReflows: 3 forced reflows counted, limit 0
+```
+
+**Reading the verdict.**
+
+```js
+{
+    ok: false,
+    verified: true,     // the run could answer the question
+    total: 3,
+    counted: 3,         // after allowlist exclusions -- none here
+    excluded: 0,
+    cost: { measured: 3, unmeasured: 0, totalMs: 4.1, maxMs: 2.2 },
+    violations: [{ metric: 'maxReflows', limit: 0, actual: 3, reason: '...' }]
+}
+```
+
+`verified: true` is the field to check first. `ok: false` with
+`verified: true` means a real breach. `ok: false` with
+`verified: false` means the run could not be judged -- see Recipe 4.
+
+**Gotchas.**
+
+- Zero is the default budget and it is the right starting point. Raise
+  it only after you have looked at what the reflows are.
+- Call `destroy()` when you are done. The profiler patches shared
+  prototypes; leaving two live at once is not supported.
+- `assertNoReflow` throws only on breach. A malformed rule set throws
+  `TypeError` immediately, at call time, before anything is evaluated.
+
+---
+
+## Recipe 2: Telling a thrash apart from a drip
+
+**Goal.** Distinguish ten reflows spread over ten frames from ten in one
+block.
+
+**Primitive.** `maxPerTask`.
+
+**Code.**
+
+```js
+checkNoReflow(profiler.summary(), {
+    maxReflows: 20,     // a drip is tolerable while you migrate
+    maxPerTask: 1       // a thrash is not
+});
+```
+
+**Reading the verdict.**
+
+```
+maxPerTask: task #7 forced 3 reflows in one synchronous block, limit 1
+```
+
+The reason names the task, so you can find every record sharing that
+`taskId` in `summary().records` and read the loop out of the call sites.
+
+**Gotchas.**
+
+- `taskId` advances at the microtask checkpoint, not at the frame
+  boundary. Two `await`-separated blocks in the same frame are two
+  tasks. That is correct: the browser can interleave between them.
+- `maxPerTask` counts *after* exclusions. An allowlisted reflow does not
+  inflate the block it sits in.
+- A single-task run reports `taskCount: 1`, which makes
+  `maxPerTask` equal to `maxReflows`. That is not a bug, it means all
+  your reflows really were in one block.
+
+---
+
+## Recipe 3: Gating on milliseconds, not counts
+
+**Goal.** Prove no single forced layout stalls long enough to drop a
+frame.
+
+**Primitive.** `maxCostMs` and `maxTotalCostMs`.
+
+**Code.**
+
+```js
+checkNoReflow(profiler.summary(), {
+    maxReflows: 50,        // counts are not the point here
+    maxCostMs: 4,          // no single stall over 4 ms
+    maxTotalCostMs: 16     // and not a whole frame's worth in total
+});
+```
+
+**Reading the verdict.**
+
+```
+maxCostMs: worst single forced reflow stalled 11.240 ms, limit 4 ms
+           (at layoutPass (grid.js:88:4))
+```
+
+The two budgets catch different illnesses on purpose. Fifty reflows of
+0.2 ms breaches `maxTotalCostMs` while passing `maxCostMs`; one reflow
+of 12 ms does the reverse. Only the second drops a frame on its own;
+only the first is fixable by batching.
+
+**Gotchas.**
+
+- Cost is measured across the *original* getter, so it is the stall
+  itself, not the profiler's bookkeeping.
+- `maxCostMs: 0` is not a stricter version of `maxReflows: 0`. Anything
+  measurable breaches it and anything unmeasurable makes it
+  unverifiable, so it always fails. Use `maxReflows: 0` for "none at
+  all".
+- Cost numbers are machine-specific. Recipe 12 covers what to do about
+  that.
+
+---
+
+## Recipe 4: Reading a verdict correctly
+
+**Goal.** Know the difference between "you broke it" and "I could not
+tell".
+
+**Primitive.** `report.verified`.
+
+**Code.**
+
+```js
+const report = checkNoReflow(summary, rules);
+
+if (!report.verified) {
+    // The run could not answer the question. Fix the recording.
+    console.error(report.violations.map((v) => v.reason).join('\n'));
+} else if (!report.ok) {
+    // A real breach.
+    throw new Error('reflow budget breached');
+}
+```
+
+**Reading the verdict.** Three states, not two:
+
+| `ok` | `verified` | meaning |
+| --- | --- | --- |
+| `true` | `true` | passed, and the evidence supported the question |
+| `false` | `true` | genuinely over budget |
+| `false` | `false` | the run could not be judged; the budget is untested |
+
+An unverifiable rule always makes `ok` false. There is no state where a
+rule is skipped and the run still passes -- that is the whole design.
+
+**Gotchas.**
+
+- The temptation on `verified: false` is to relax the budget until it
+  goes green. That is the one response guaranteed to be wrong: the
+  budget was never evaluated, so relaxing it changes nothing except
+  your confidence.
+- `violations` entries with `limit: null` are the unverifiable ones.
+  Their `metric` is `records`, `ignoreSites`, or `cost`.
+
+---
+
+## Recipe 5: Allowlisting the reflows you meant to have
+
+**Goal.** Measure an element once on purpose without failing the gate.
+
+**Primitive.** `allowReads`, `allowWrites`.
+
+**Code.**
+
+```js
+checkNoReflow(summary, {
+    maxReflows: 0,
+    allowReads: ['getBoundingClientRect'],       // trailing () optional
+    allowWrites: ['CSSStyleDeclaration.transform']   // prefix match
+});
+```
+
+**Reading the verdict.**
+
+```js
+{
+    total: 5,
+    counted: 1,
+    excluded: 4,
+    excludedBy: { reads: 3, writes: 1, sites: 0 }
+}
+```
+
+`total` stays honest and the subtraction is visible. That matters when
+someone reviews the budget six months later and wants to know what it is
+not looking at.
+
+**Gotchas.**
+
+- `allowReads` is validated against `READ_NAMES`. A typo throws with a
+  suggestion rather than silently matching nothing:
+  `` `offsetWidht` is not a read this build can emit. Did you mean `offsetWidth`? ``
+- `allowWrites` is a **prefix** match. `'CSSStyleDeclaration.'` allows
+  every style write, which is almost always too broad.
+- A record is excluded once even when several allowlists match it, so
+  `excludedBy` sums to `excluded`.
+
+---
+
+## Recipe 6: Silencing a third-party library
+
+**Goal.** Gate your own code without failing on a dependency you cannot
+change.
+
+**Primitive.** `ignoreSites`.
+
+**Code.**
+
+```js
+checkNoReflow(summary, {
+    maxReflows: 0,
+    ignoreSites: ['node_modules/gsap', 'node_modules/floating-ui']
+});
+```
+
+**Reading the verdict.** `excludedBy.sites` tells you how much of the
+run you stopped looking at. If that number is most of the run, the
+budget is decorative.
+
+**Gotchas.**
+
+- `ignoreSites` matches `readSite` **or** `writeSite`. A dependency that
+  writes and lets your code read still gets excluded -- which may not be
+  what you want, since the fix is yours.
+- It needs call sites, so it is unverifiable under
+  `captureStacks: false`.
+- Do not confuse it with `ignorePatterns`, which is the profiler option.
+  `ignorePatterns` drops the reflow at capture time so it never appears
+  in `total`; `ignoreSites` excludes an already-recorded one at gate
+  time and reports the subtraction. Prefer `ignoreSites` so the number
+  stays honest.
+
+---
+
+## Recipe 7: Gating one interaction, not the whole page
+
+**Goal.** Attribute reflows to the interaction under test, not to
+startup.
+
+**Primitive.** `reset()`.
+
+**Code.**
+
+```js
+const profiler = createLayoutProfiler({ warnToConsole: false });
+
+await settleTheApp();       // startup reflows are not what we are testing
+profiler.reset();
+
+await clickTheThing();
+const report = checkNoReflow(profiler.summary(), { maxReflows: 0 });
+```
+
+**Reading the verdict.** After `reset()`, `total` restarts at zero and
+so does `stored`. `taskId` does **not** restart -- it is monotonic for
+the profiler's lifetime, so task numbers in the reason string stay
+unique across resets.
+
+**Gotchas.**
+
+- Await a microtask checkpoint before `reset()` if the previous work
+  ended mid-block, or its trailing dirty flag will follow you into the
+  measured window.
+- One profiler at a time. To measure two interactions independently,
+  reset between them rather than creating a second instance.
+
+---
+
+## Recipe 8: Running headless in CI
+
+**Goal.** Fail a pull request that introduces layout thrashing.
+
+**Primitive.** a real browser plus `assertNoReflow`.
+
+**Code.**
+
+```js
+// playwright, puppeteer, whatever drives a real engine
+await page.addScriptTag({ type: 'module', content: `
+    const { createLayoutProfiler } = await import('/node_modules/@zakkster/lite-layout-profiler/LayoutProfiler.js');
+    window.__profiler = createLayoutProfiler({ warnToConsole: false });
+` });
+
+await page.click('#open-drawer');
+
+const summary = await page.evaluate(() => window.__profiler.summary());
+
+// back in node
+import { assertNoReflow } from '@zakkster/lite-layout-profiler';
+assertNoReflow(summary, { maxReflows: 0, maxPerTask: 1 });
+```
+
+**Reading the verdict.** The gate runs in node against a plain object.
+It never touches the DOM, so it does not care that the browser is gone
+by the time the assertion runs.
+
+**Gotchas.**
+
+- Use a real browser. jsdom and happy-dom do not implement layout, so
+  their getters cost nothing and the per-property style setters may not
+  bypass `setProperty` the way real WebIDL does. The detector still
+  fires, but the cost lane measures nothing real.
+- Minified bundles produce minified call sites. Run against the
+  unminified build or your reasons will read `at a.b (chunk.js:1:9482)`.
+
+---
+
+## Recipe 9: Shipping a summary out of the browser
+
+**Goal.** Record in one place, judge in another.
+
+**Primitive.** `summary()` is JSON-serialisable by design.
+
+**Code.**
+
+```js
+// in the page
+navigator.sendBeacon('/reflow', JSON.stringify(profiler.summary()));
+
+// on the server, or in CI, or in a later process
+import { checkNoReflow } from '@zakkster/lite-layout-profiler';
+const report = checkNoReflow(JSON.parse(body), { maxReflows: 0 });
+```
+
+**Reading the verdict.** The summary carries everything the gate needs:
+counts, per-task grouping, call sites, costs, and the evidence flags
+(`truncated`, `stacks`, `cost.resolutionMs`) that decide what can be
+verified. Nothing about the verdict depends on the profiler still
+existing.
+
+**Gotchas.**
+
+- Full stacks are deliberately **not** in the summary -- they dominate
+  the payload and the gate matches on parsed sites. Read
+  `profiler.violations` while you still have the profiler if you want
+  them.
+- `records` is capped at `maxStored`. If you are shipping summaries from
+  real users, either raise the cap or accept `truncated: true` and gate
+  on `maxReflows` only.
+
+---
+
+## Recipe 10: Keeping the profiler out of its own numbers
+
+**Goal.** Stop your debugging UI from being the thing that forces
+layout.
+
+**Primitive.** `ignorePatterns` plus a deferred repaint.
+
+**Code.**
+
+```js
+let queued = false;
+function schedulePaint() {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(paint);   // never inside the measured block
+}
+
+const profiler = createLayoutProfiler({
+    ignorePatterns: ['paint', 'devtools-overlay.js'],
+    onViolation: schedulePaint
+});
+```
+
+**Reading the verdict.** If your overlay writes to the DOM inside
+`onViolation`, it sets the dirty flag *inside the loop being measured*,
+and the next iteration's read gets attributed to your overlay. The
+counts may look right and the attribution will be wrong.
+
+**Gotchas.**
+
+- `onViolation` fires synchronously, inside the offending task. Treat it
+  like an interrupt handler: record, do not render.
+- `ignorePatterns` is matched against the raw stack, so it catches the
+  frame even when the write is several calls deep in your overlay code.
+- The bundled demo does exactly this, and did not in 1.1.
+
+---
+
+## Recipe 11: Finding the write, not just the read
+
+**Goal.** Fix the reflow, which usually means moving the write, not the
+read.
+
+**Primitive.** `summary().byWrite` and `record.writeSite`.
+
+**Code.**
+
+```js
+const s = profiler.summary();
+console.table(s.byWrite);
+
+// group the worst task
+const worst = s.records.filter((r) => r.taskId === 7);
+console.table(worst.map((r) => ({ read: r.read, at: r.writeSite, ms: r.costMs })));
+```
+
+**Reading the verdict.** The read is where the stall was *paid*. The
+write is where it was *caused*. A single stray `el.style.width = x` at
+the top of a loop turns every subsequent read in that loop into a
+forced reflow, and `byRead` will blame the reads.
+
+**Gotchas.**
+
+- `write` is the source string (`'CSSStyleDeclaration.width ='`), not
+  the element. Element attribution arrives in a later version.
+- Per-property setters are reported individually
+  (`CSSStyleDeclaration.width =`), while `setProperty()` is reported as
+  a method call. The same visual change can appear under either
+  depending on how your framework writes it.
+
+---
+
+## Recipe 12: Pro: cost budgets that survive a different browser
+
+**Goal.** A cost budget that does not go red the moment CI runs on a
+slower machine or a coarser clock.
+
+**Primitive.** the clock floor, and knowing when to give up on ms.
+
+**Code.**
+
+```js
+const s = profiler.summary();
+
+const rules = s.cost.resolutionMs !== null && s.cost.unmeasured === 0
+    ? { maxReflows: 50, maxCostMs: 4, maxTotalCostMs: 16 }
+    : { maxReflows: 50, maxPerTask: 1 };   // this host cannot do ms
+
+checkNoReflow(s, rules);
+```
+
+**Reading the verdict.** `cost.resolutionMs` is the clock floor this run
+actually had. Non-isolated Chrome clamps to 100us; Firefox defaults to
+1ms. A 0.3 ms stall is measurable on the first and invisible on the
+second.
+
+**Gotchas.**
+
+- Counts are portable, milliseconds are not. If a budget has to hold
+  across browsers, gate on `maxReflows` and `maxPerTask` and treat cost
+  as a local diagnostic.
+- Do not paper over a coarse clock by lowering `maxCostMs`. A lower
+  limit on unmeasurable data is still unmeasurable.
+- Cross-origin isolation (`COOP`/`COEP`) restores a finer clock in
+  Chrome. If you control the test harness, that is the real fix.
+
+---
+
+## Recipe 13: Pro: gating a run you could only partly record
+
+**Goal.** Get a defensible verdict out of a run that overflowed the
+record ring.
+
+**Primitive.** `truncated`, and the one rule that survives it.
+
+**Code.**
+
+```js
+const s = profiler.summary();
+
+if (s.truncated) {
+    // Per-record rules cannot be evaluated over a torn set.
+    checkNoReflow(s, { maxReflows: 0 });
+} else {
+    checkNoReflow(s, { maxReflows: 0, maxPerTask: 1, maxCostMs: 4 });
+}
+```
+
+**Reading the verdict.**
+
+```
+records: Records were truncated by the storage cap (200 of 1841 kept), so
+per-record rules cannot be evaluated over the whole run. Raise `maxStored`
+or lower the reflow count.
+```
+
+`total` is still exact -- the counter is independent of the ring -- so
+`maxReflows` gates precisely even on a truncated run. Everything that
+reasons about individual records refuses.
+
+**Gotchas.**
+
+- Raising `maxStored` to swallow a thrashing run costs memory and does
+  not fix anything. If you are dropping 1600 records, the count alone
+  has already told you the answer.
+- Truncation is not an error state. It is a normal outcome of pointing a
+  detector at a page that thrashes, and the gate handles it by narrowing
+  what it claims.
+
+---
+
+## Recipe 14: Pro: the CI-counting configuration
+
+**Goal.** The cheapest useful run: counts only, no stacks, no timing.
+
+**Primitive.** `captureStacks: false`, `measureCost: false`.
+
+**Code.**
+
+```js
+const profiler = createLayoutProfiler({
+    captureStacks: false,   // no Error.stack per write
+    measureCost: false,     // no init probe, no clock reads per violation
+    warnToConsole: false
+});
+
+// ... run the interaction ...
+
+assertNoReflow(profiler.summary(), { maxReflows: 0, maxPerTask: 1 });
+```
+
+**Reading the verdict.** `stacks: false` and
+`cost.resolutionMs: null` in the summary. `maxReflows` and `maxPerTask`
+work exactly as before; `ignoreSites`, `maxCostMs` and
+`maxTotalCostMs` all become unverifiable and fail.
+
+**Gotchas.**
+
+- This configuration answers "did it happen" and cannot answer "where"
+  or "how bad". Use it for the regression gate and re-run with stacks
+  when it goes red.
+- `captureStacks: false` skips an `Error.stack` allocation on **every
+  DOM write**, not just violations. On a write-heavy page that is the
+  larger of the two savings by a wide margin.
+
+---
+
+## Recipe 15: Pro: one vocabulary with lite-gc-profiler
+
+**Goal.** One CI reporter for both profilers.
+
+**Primitive.** the shared `{ metric, limit, actual, reason }` violation
+shape.
+
+**Code.**
+
+```js
+import { checkNoReflow } from '@zakkster/lite-layout-profiler';
+import { checkNoGc } from '@zakkster/lite-gc-profiler';
+
+function report(name, r) {
+    if (r.ok) return console.log(name + ': pass');
+    for (const v of r.violations) {
+        console.error(name + ': ' + v.metric + ' -> ' + v.reason);
+    }
+    process.exitCode = 1;
+}
+
+report('layout', checkNoReflow(layoutSummary, { maxReflows: 0 }));
+report('gc', checkNoGc(gcSummary, { maxMajor: 0 }));
+```
+
+**Reading the verdict.** Both libraries emit the same violation entry
+shape, so one formatter handles both. They also share the same posture:
+a rule that cannot be verified fails rather than passes.
+
+**Gotchas.**
+
+- The field names around the violations differ. `checkNoReflow` reports
+  `verified`; `checkNoGc` reports a `verdict` including
+  `inconclusive`. They mean the same thing and are spelled differently
+  for historical reasons.
+- `lite-layout-profiler` is browser-only for recording and node-friendly
+  for gating. `lite-gc-profiler` is precise in node and heuristic in the
+  browser. They cover opposite halves of the same frame budget: bytes
+  and layout.

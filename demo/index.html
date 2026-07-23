@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>lite-layout-profiler 1.0.0 -- forced-reflow detector</title>
+<title>lite-layout-profiler 1.2.0 -- forced-reflow detector</title>
 <style>
   :root {
     --bg:        #05100a; --bg: oklch(0.16 0.03 165);
@@ -54,16 +54,36 @@
   .note { color: var(--ink-faint); font-size: 0.72rem; margin-top: 0.6rem; }
   .row-toolbar { margin-top: 0.5rem; }
   .log-placeholder { color: var(--ink-faint); }
+  .stat-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem 1rem; }
+  .stat { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.76rem;
+    border-bottom: 1px solid var(--edge); padding-bottom: 0.25rem; }
+  .stat span:first-child { color: var(--ink-faint); }
+  .stat span:last-child { font-variant-numeric: tabular-nums; color: var(--ink); }
+  .stat .null { color: var(--ink-faint); font-style: italic; }
+  .verdict { font-size: 1rem; font-weight: 700; letter-spacing: 0.08em; margin: 0.2rem 0 0.5rem; }
+  .verdict.pass { color: var(--good); }
+  .verdict.fail { color: var(--bad); }
+  .verdict.unverified { color: var(--warn); }
+  .rule { font-size: 0.72rem; color: var(--ink-dim); padding: 0.3rem 0; border-top: 1px solid var(--edge); }
+  .rule b { color: var(--warn); }
+  .cost-tag { color: var(--warn); }
+  .cost-tag.null { color: var(--ink-faint); font-style: italic; }
+  fieldset { border: 1px solid var(--edge); border-radius: var(--r); padding: 0.5rem 0.7rem; margin: 0; }
+  legend { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-faint); }
+  label { font-size: 0.74rem; color: var(--ink-dim); display: inline-flex; align-items: center; gap: 0.3rem; margin-right: 0.8rem; }
+  input[type="number"] { font: inherit; font-size: 0.74rem; width: 4rem; background: var(--bg);
+    color: var(--ink); border: 1px solid var(--edge); border-radius: 3px; padding: 0.15rem 0.3rem; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <h1>lite-layout-profiler <span class="v">1.0.0 -- forced-reflow detector</span></h1>
+    <h1>lite-layout-profiler <span class="v">1.2.0 -- forced-reflow detector</span></h1>
     <p class="sub">
       Click the buttons to trigger layout thrashing patterns. The profiler patches
       <code>offsetWidth</code>, <code>getBoundingClientRect</code>, etc. and flags
-      every read-after-write in the same synchronous task. Open DevTools console to
+      every read-after-write in the same synchronous task, times the stall it
+      caused, and gates the run against a budget. Open DevTools console to
       see <code>console.warn</code> with call-site attribution.
     </p>
   </header>
@@ -95,6 +115,35 @@
         <div class="note">total forced reflows detected</div>
         <div class="note" id="summaryDetail"></div>
       </div>
+
+      <div class="card">
+        <h2>Cost lane</h2>
+        <div class="stat-grid">
+          <div class="stat"><span>measured</span><span id="cMeasured">0</span></div>
+          <div class="stat"><span>unmeasured</span><span id="cUnmeasured">0</span></div>
+          <div class="stat"><span>total</span><span id="cTotal" class="null">null</span></div>
+          <div class="stat"><span>worst</span><span id="cMax" class="null">null</span></div>
+          <div class="stat"><span>avg</span><span id="cAvg" class="null">null</span></div>
+          <div class="stat"><span>p99</span><span id="cP99" class="null">null</span></div>
+        </div>
+        <p class="note">
+          Clock floor: <span id="cRes">probing...</span>. A stall that does not clear
+          more than one tick is <code>null</code>, never <code>0</code> -- one tick means
+          the true duration lies in <code>(0, 2 x tick)</code>, which contains zero.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>Gate</h2>
+        <div class="verdict pass" id="verdict">PASS</div>
+        <fieldset>
+          <legend>budget</legend>
+          <label>maxReflows <input type="number" id="ruleReflows" min="0" value="0"></label>
+          <label>maxPerTask <input type="number" id="rulePerTask" min="1" value="3"></label>
+          <label>maxCostMs <input type="number" id="ruleCost" min="0" step="0.5" value="4"></label>
+        </fieldset>
+        <div id="ruleList"></div>
+      </div>
     </div>
     <div>
       <div class="card">
@@ -115,39 +164,114 @@
 }
 </script>
 <script type="module">
-import { createLayoutProfiler } from '@zakkster/lite-layout-profiler';
+import { createLayoutProfiler, checkNoReflow } from '@zakkster/lite-layout-profiler';
 
+// All DOM refs cached at init.
 const $target = document.getElementById('target');
 const $totalCount = document.getElementById('totalCount');
 const $summaryDetail = document.getElementById('summaryDetail');
 const $log = document.getElementById('log');
+const $cMeasured = document.getElementById('cMeasured');
+const $cUnmeasured = document.getElementById('cUnmeasured');
+const $cTotal = document.getElementById('cTotal');
+const $cMax = document.getElementById('cMax');
+const $cAvg = document.getElementById('cAvg');
+const $cP99 = document.getElementById('cP99');
+const $cRes = document.getElementById('cRes');
+const $verdict = document.getElementById('verdict');
+const $ruleList = document.getElementById('ruleList');
+const $ruleReflows = document.getElementById('ruleReflows');
+const $rulePerTask = document.getElementById('rulePerTask');
+const $ruleCost = document.getElementById('ruleCost');
 
-function updateUI() {
-    const c = profiler.violationCount;
-    $totalCount.textContent = c;
-    $totalCount.className = c === 0 ? 'counter zero' : 'counter';
+// The profiler's own UI writes touch the DOM, which would dirty layout inside
+// the very task being measured. Two defences: attribution drops any frame from
+// this file, and the repaint is deferred to a rAF so it never lands mid-loop.
+const profiler = createLayoutProfiler({
+    warnToConsole: true,
+    ignorePatterns: ['paint', 'demo/index.html'],
+    onViolation: schedulePaint
+});
 
+let paintQueued = false;
+function schedulePaint() {
+    if (paintQueued) return;
+    paintQueued = true;
+    requestAnimationFrame(paint);
+}
+
+// `null` is rendered as the word, not as a zero -- the whole point of the lane.
+function ms(v) {
+    return v === null ? null : v.toFixed(3) + ' ms';
+}
+function setStat(el, value) {
+    if (value === null) {
+        el.textContent = 'null';
+        el.className = 'null';
+    } else {
+        el.textContent = value;
+        el.className = '';
+    }
+}
+
+function paint() {
+    paintQueued = false;
     const s = profiler.summary();
-    const reads = Object.entries(s.byRead).map(function (e) { return e[0] + ': ' + e[1]; }).join(', ');
+
+    $totalCount.textContent = s.total;
+    $totalCount.className = s.total === 0 ? 'counter zero' : 'counter';
+
+    const reads = Object.keys(s.byRead).map((k) => k + ': ' + s.byRead[k]).join(', ');
     $summaryDetail.textContent = reads ? 'by read: ' + reads : '';
 
+    setStat($cMeasured, s.cost.measured);
+    setStat($cUnmeasured, s.cost.unmeasured);
+    setStat($cTotal, ms(s.cost.totalMs));
+    setStat($cMax, ms(s.cost.maxMs));
+    setStat($cAvg, ms(s.cost.avgMs));
+    setStat($cP99, ms(s.cost.p99Ms));
+    $cRes.textContent = s.cost.resolutionMs === null
+        ? 'undeterminable' : s.cost.resolutionMs + ' ms';
+
+    const report = checkNoReflow(s, {
+        maxReflows: Number($ruleReflows.value) || 0,
+        maxPerTask: Number($rulePerTask.value) || 1,
+        maxCostMs: Number($ruleCost.value) || 0
+    });
+    if (report.ok) {
+        $verdict.textContent = 'PASS';
+        $verdict.className = 'verdict pass';
+    } else if (!report.verified) {
+        $verdict.textContent = 'UNVERIFIED';
+        $verdict.className = 'verdict unverified';
+    } else {
+        $verdict.textContent = 'FAIL';
+        $verdict.className = 'verdict fail';
+    }
+    let rules = '';
+    for (let i = 0; i < report.violations.length; i++) {
+        rules += '<div class="rule"><b>' + report.violations[i].metric + '</b> ' +
+            report.violations[i].reason + '</div>';
+    }
+    $ruleList.innerHTML = rules;
+
     let html = '';
-    const vs = profiler.violations;
-    for (let i = vs.length - 1; i >= 0; i--) {
-        const v = vs[i];
+    const recs = s.records;
+    for (let i = recs.length - 1; i >= 0; i--) {
+        const v = recs[i];
+        const cost = v.costMs === null
+            ? '<span class="cost-tag null">' +
+              (v.belowGranularity ? 'below resolution' : 'unmeasured') + '</span>'
+            : '<span class="cost-tag">' + v.costMs.toFixed(3) + ' ms</span>';
         html += '<div class="violation">' +
-            '<b>#' + v.id + '</b> read <code>' + v.read + '</code> after <code>' + v.write + '</code>' +
+            '<b>#' + v.id + '</b> task ' + v.taskId + ' &middot; ' + cost +
+            '<br>read <code>' + v.read + '</code> after <code>' + v.write + '</code>' +
             '<br><span class="site">read: ' + v.readSite + '</span>' +
             '<br><span class="site">write: ' + v.writeSite + '</span>' +
             '</div>';
     }
     $log.innerHTML = html || '<span class="log-placeholder">No violations yet.</span>';
 }
-
-const profiler = createLayoutProfiler({
-    warnToConsole: true,
-    onViolation: function () { updateUI(); }
-});
 
 // ---- Thrash patterns ----
 
@@ -159,7 +283,7 @@ document.getElementById('btnSingle').addEventListener('click', function () {
 document.getElementById('btnLoop').addEventListener('click', function () {
     for (let i = 0; i < 10; i++) {
         $target.style.width = (60 + i * 10) + 'px';
-        void $target.offsetHeight;  // FORCED REFLOW x10
+        void $target.offsetHeight;  // FORCED REFLOW x10, all in one task
     }
 });
 
@@ -167,7 +291,7 @@ document.getElementById('btnSafe').addEventListener('click', function () {
     // Read FIRST, then write -- no forced reflow.
     const w = $target.offsetWidth;
     $target.style.width = (w + 10) + 'px';
-    updateUI();
+    schedulePaint();
 });
 
 document.getElementById('btnBcr').addEventListener('click', function () {
@@ -190,8 +314,14 @@ document.getElementById('btnAppend').addEventListener('click', function () {
 
 document.getElementById('btnReset').addEventListener('click', function () {
     profiler.reset();
-    updateUI();
+    schedulePaint();
 });
+
+$ruleReflows.addEventListener('input', schedulePaint);
+$rulePerTask.addEventListener('input', schedulePaint);
+$ruleCost.addEventListener('input', schedulePaint);
+
+schedulePaint();
 </script>
 </body>
 </html>

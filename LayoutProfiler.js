@@ -1,4 +1,4 @@
-// @zakkster/lite-layout-profiler 1.1.0
+// @zakkster/lite-layout-profiler 1.2.0
 // Dev-mode forced-reflow detector. Patches layout-triggering getters on
 // Element/HTMLElement prototypes, tracks DOM writes that invalidate layout,
 // and flags read-after-write within the same synchronous task. Attributes
@@ -9,13 +9,19 @@
 // it cannot verify from the data it was handed fails the run rather than
 // passing it. Unknown rule keys throw with a did-you-mean hint.
 //
+// v1.2 adds the cost lane: each forced reflow is timed across the original
+// getter, so the report carries milliseconds of stall and not just a count.
+// A timer-resolution probe runs at init; any measurement that lands below
+// the clock's granularity is reported as null, never as zero. Cost rules
+// refuse to evaluate over unmeasured reflows.
+//
 // NOT zero-GC. This is a diagnostic tool that allocates per violation.
 // Ship behind a __DEV__ flag or strip from production builds.
 //
 // Copyright (c) 2026 Zahary Shinikchiev <shinikchiev@yahoo.com>
 // MIT License
 
-export const VERSION = '1.1.0';
+export const VERSION = '1.2.0';
 
 // ---------------------------------------------------------------------------
 // Layout-triggering reads (the getters that force synchronous layout)
@@ -129,9 +135,50 @@ function parseStack(raw) {
         if (line.indexOf('createLayoutProfiler') >= 0) continue;
         if (line.indexOf('markDirty') >= 0) continue;
         if (line.indexOf('onRead') >= 0) continue;
+        if (line.indexOf('recordRead') >= 0) continue;
+        if (line.indexOf('measuredGet') >= 0) continue;
+        if (line.indexOf('measuredCall') >= 0) continue;
         if (line.length > 0) return line;
     }
     return lines[2] ? lines[2].trim() : '(unknown)';
+}
+
+// ---------------------------------------------------------------------------
+// Clock and timer resolution (v1.2)
+// ---------------------------------------------------------------------------
+
+const clock = (typeof performance !== 'undefined' && performance.now)
+    ? function () { return performance.now(); }
+    : function () { return Date.now(); };
+
+/**
+ * Smallest positive delta the clock will report.
+ *
+ * Browsers deliberately coarsen performance.now(): a non-isolated Chrome tab
+ * clamps to 100us, Firefox to 1ms by default. A forced reflow shorter than
+ * that reads back as exactly 0, which is indistinguishable from free. We
+ * measure the floor once so those measurements can be reported as null
+ * instead of laundered into zero.
+ *
+ * Budgeted: at most `budgetMs` of wall time and 8 samples, so a coarse clock
+ * costs a couple of milliseconds at init rather than fifty. Returns null when
+ * no positive delta could be observed at all -- in which case every cost is
+ * unmeasured and cost rules become unverifiable, which is the correct
+ * fail-closed outcome.
+ */
+function probeResolution(budgetMs, clk) {
+    var min = Infinity;
+    var deadline = clk() + budgetMs;
+    for (var i = 0; i < 8; i++) {
+        var a = clk();
+        var b = a;
+        var spins = 0;
+        while (b === a && spins < 200000) { b = clk(); spins++; }
+        var d = b - a;
+        if (d > 0 && d < min) min = d;
+        if (clk() >= deadline) break;
+    }
+    return (min === Infinity || !isFinite(min)) ? null : min;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,15 +196,15 @@ function parseStack(raw) {
 // ---------------------------------------------------------------------------
 
 const RULE_KEYS = [
-    'maxReflows', 'maxPerTask', 'allowReads', 'allowWrites', 'ignoreSites'
+    'maxReflows', 'maxPerTask', 'maxCostMs', 'maxTotalCostMs',
+    'allowReads', 'allowWrites', 'ignoreSites'
 ];
 
 // Rules that belong to lanes not yet shipped. Recognised so the error can say
 // what is actually wrong instead of offering a nonsense spelling suggestion.
 const FUTURE_RULE_KEYS = {
-    maxCostMs: ['1.2', 'cost lane'],
-    maxTotalCostMs: ['1.2', 'cost lane'],
     maxInRaf: ['1.3', 'phase lane'],
+    maxThrash: ['1.3', 'phase lane'],
     allowExpected: ['1.5', 'expected-scope lane']
 };
 
@@ -280,6 +327,8 @@ function validateRules(rules) {
 
     if (rules.maxReflows !== undefined) requireCount('maxReflows', rules.maxReflows);
     if (rules.maxPerTask !== undefined) requireCount('maxPerTask', rules.maxPerTask);
+    if (rules.maxCostMs !== undefined) requireCount('maxCostMs', rules.maxCostMs);
+    if (rules.maxTotalCostMs !== undefined) requireCount('maxTotalCostMs', rules.maxTotalCostMs);
     if (rules.allowReads !== undefined) requireStringList('allowReads', rules.allowReads);
     if (rules.allowWrites !== undefined) requireStringList('allowWrites', rules.allowWrites);
     if (rules.ignoreSites !== undefined) requireStringList('ignoreSites', rules.ignoreSites);
@@ -337,6 +386,8 @@ export function checkNoReflow(summary, rules) {
 
     var maxReflows = r.maxReflows === undefined ? 0 : r.maxReflows;
     var maxPerTask = r.maxPerTask === undefined ? Infinity : r.maxPerTask;
+    var maxCostMs = r.maxCostMs === undefined ? Infinity : r.maxCostMs;
+    var maxTotalCostMs = r.maxTotalCostMs === undefined ? Infinity : r.maxTotalCostMs;
     var allowReads = r.allowReads || [];
     var allowWrites = r.allowWrites || [];
     var ignoreSites = r.ignoreSites || [];
@@ -350,12 +401,14 @@ export function checkNoReflow(summary, rules) {
         counted: total,
         excluded: 0,
         excludedBy: { reads: 0, writes: 0, sites: 0 },
+        cost: null,
         violations: []
     };
 
+    var needsCost = maxCostMs !== Infinity || maxTotalCostMs !== Infinity;
     var hasAllowlist =
         allowReads.length > 0 || allowWrites.length > 0 || ignoreSites.length > 0;
-    var needsRecords = hasAllowlist || maxPerTask !== Infinity;
+    var needsRecords = hasAllowlist || maxPerTask !== Infinity || needsCost;
     var records = Array.isArray(summary.records) ? summary.records : null;
 
     // -- Evidence checks, before any counting --
@@ -451,6 +504,71 @@ export function checkNoReflow(summary, rules) {
         }
     }
 
+    // -- Cost lane --
+    //
+    // A reflow whose stall landed below the clock's granularity has no
+    // number, only an upper bound. Summing nulls as zeroes would let a
+    // thousand sub-resolution stalls pass a millisecond budget, so cost
+    // rules refuse to evaluate over them at all.
+
+    if (kept !== null) {
+        var measured = 0, unmeasured = 0;
+        var totalMs = 0, maxMs = 0, worstSite = '';
+        for (var c = 0; c < kept.length; c++) {
+            var cost = kept[c].costMs;
+            if (typeof cost !== 'number') { unmeasured++; continue; }
+            measured++;
+            totalMs += cost;
+            if (cost > maxMs) { maxMs = cost; worstSite = kept[c].readSite; }
+        }
+        out.cost = {
+            measured: measured,
+            unmeasured: unmeasured,
+            // Null is not zero: with nothing measured there is no total.
+            totalMs: measured > 0 ? totalMs : null,
+            maxMs: measured > 0 ? maxMs : null
+        };
+
+        if (needsCost && unmeasured > 0) {
+            var res = summary.cost && typeof summary.cost.resolutionMs === 'number'
+                ? summary.cost.resolutionMs : null;
+            unverifiable(out, 'cost', unmeasured + ' unmeasured',
+                unmeasured + ' of ' + kept.length + ' counted reflow' +
+                (kept.length === 1 ? '' : 's') + ' carry no cost' +
+                (res === null
+                    ? ', because the timer resolution could not be determined ' +
+                      '(or the run was recorded with measureCost: false).'
+                    : ', having landed below the ' + res + ' ms timer resolution. ' +
+                      'Gate on counts instead, or raise the workload so each stall ' +
+                      'clears the clock.'));
+        }
+
+        if (needsCost && measured > 0 && out.verified) {
+            if (maxMs > maxCostMs) {
+                out.ok = false;
+                out.violations.push({
+                    metric: 'maxCostMs',
+                    limit: maxCostMs,
+                    actual: maxMs,
+                    reason: 'maxCostMs: worst single forced reflow stalled ' +
+                        maxMs.toFixed(3) + ' ms, limit ' + maxCostMs + ' ms' +
+                        (worstSite ? ' (' + worstSite.trim() + ')' : '')
+                });
+            }
+            if (totalMs > maxTotalCostMs) {
+                out.ok = false;
+                out.violations.push({
+                    metric: 'maxTotalCostMs',
+                    limit: maxTotalCostMs,
+                    actual: totalMs,
+                    reason: 'maxTotalCostMs: ' + measured + ' forced reflows stalled ' +
+                        totalMs.toFixed(3) + ' ms in total, limit ' +
+                        maxTotalCostMs + ' ms'
+                });
+            }
+        }
+    }
+
     return out;
 }
 
@@ -496,8 +614,12 @@ export function createLayoutProfiler(options) {
             summary: function () {
                 return {
                     total: 0, stored: 0, truncated: false, stacks: false,
-                    byRead: {}, byWrite: {}, byTask: {},
-                    taskCount: 0, records: []
+                    byRead: {}, byWrite: {}, byTask: {}, taskCount: 0,
+                    cost: {
+                        resolutionMs: null, measured: 0, unmeasured: 0,
+                        totalMs: null, maxMs: null, avgMs: null, p99Ms: null
+                    },
+                    records: []
                 };
             }
         };
@@ -511,12 +633,45 @@ export function createLayoutProfiler(options) {
     var maxViolations = opts.maxStored || opts.maxViolations || 200;
     var onViolation = opts.onViolation || null;
     var captureStacks = opts.captureStacks !== false;
+    var measureCost = opts.measureCost !== false;
+    // Monotonic millisecond clock. Defaults to performance.now(). Overridable
+    // for environments without it, and so tests can drive a clock with known
+    // granularity instead of hoping the host's happens to be coarse.
+    var clk = typeof opts.clock === 'function' ? opts.clock : clock;
     var warnToConsole = opts.warnToConsole !== false;
     var ignorePatterns = opts.ignorePatterns || [];
 
-    var violations = [];
+    // Records live in a fixed-size ring. v1.1 used a plain array with shift()
+    // on overflow, which is O(N) per drop once the buffer is full -- a real
+    // cost in exactly the thrashing runs this tool is pointed at. The ring
+    // writes in place and never moves an element.
+    var cap = maxViolations > 0 ? maxViolations : 1;
+    var ring = new Array(cap);
+    var ringWrite = 0;
+    var ringCount = 0;
+    var violationsCache = null;
     var violationCount = 0;
     var active = true;
+
+    // Timer floor, probed once. Null means "cannot tell", not "zero".
+    var resolutionMs = measureCost ? probeResolution(2, clk) : null;
+
+    function pushRecord(v) {
+        ring[ringWrite] = v;
+        ringWrite = ringWrite + 1 === cap ? 0 : ringWrite + 1;
+        if (ringCount < cap) ringCount++;
+        violationsCache = null;
+    }
+
+    // Walks retained records oldest-first regardless of where the ring wrapped.
+    function forEachRecord(fn) {
+        var start = ringCount < cap ? 0 : ringWrite;
+        for (var i = 0; i < ringCount; i++) {
+            var idx = start + i;
+            if (idx >= cap) idx -= cap;
+            fn(ring[idx]);
+        }
+    }
 
     // -- dirty tracking --
     // Set to a string (the write source) on layout-invalidating writes.
@@ -563,10 +718,36 @@ export function createLayoutProfiler(options) {
         return false;
     }
 
-    function onRead(prop) {
-        if (!active || dirty === null) return;
+    // True when a read happening right now would force a synchronous layout.
+    // Checked before the clock is touched so clean reads pay one comparison
+    // and nothing else.
+    function armed() {
+        return active && dirty !== null;
+    }
+
+    /**
+     * Record a forced reflow. `elapsedMs` is the wall time spent inside the
+     * original getter -- the stall itself, not the bookkeeping around it.
+     *
+     * A delta below the probed timer resolution is not a small number, it is
+     * an absent one: the clock cannot distinguish it from zero. It is stored
+     * as null with belowGranularity set, and the gate refuses to run cost
+     * rules over it.
+     */
+    function recordRead(prop, elapsedMs) {
         var readStack = captureStacks ? captureStack() : '';
-        if (shouldIgnore(readStack)) return;
+        if (shouldIgnore(readStack)) { dirty = null; return; }
+
+        // Strictly greater, not >=. A delta of exactly one tick means the
+        // true duration lies somewhere in (0, 2 * tick) -- an interval that
+        // contains zero, so it is not evidence of any stall at all. Only from
+        // two ticks up does the measurement carry a positive lower bound.
+        var below = false;
+        var costMs = null;
+        if (resolutionMs !== null) {
+            if (elapsedMs > resolutionMs) costMs = elapsedMs;
+            else below = true;
+        }
 
         violationCount++;
         var v = {
@@ -578,17 +759,21 @@ export function createLayoutProfiler(options) {
             writeSite: captureStacks ? parseStack(dirtyStack) : '(stacks disabled)',
             readStack: readStack,
             writeStack: dirtyStack,
-            timestamp: typeof performance !== 'undefined' ? performance.now() : Date.now()
+            costMs: costMs,
+            belowGranularity: below,
+            timestamp: clk()
         };
 
-        if (violations.length >= maxViolations) violations.shift();
-        violations.push(v);
+        pushRecord(v);
 
         if (onViolation !== null) onViolation(v);
         if (warnToConsole) {
             console.warn(
                 '[lite-layout-profiler] Forced reflow #' + violationCount +
                 ': read `' + prop + '` after `' + dirtySource + '`' +
+                (costMs === null
+                    ? '\n  cost:     below timer resolution'
+                    : '\n  cost:     ' + costMs.toFixed(3) + ' ms') +
                 '\n  read at:  ' + v.readSite +
                 '\n  write at: ' + v.writeSite
             );
@@ -598,6 +783,31 @@ export function createLayoutProfiler(options) {
         // reads (without intervening writes) are cheap. Clear dirty so
         // we don't flag the same reflow multiple times.
         dirty = null;
+    }
+
+    // Wrap a zero-argument layout getter so the stall inside it is timed.
+    function measuredGet(originalGet, name) {
+        return function () {
+            if (!armed()) return originalGet.call(this);
+            var t0 = clk();
+            var value = originalGet.call(this);
+            recordRead(name, clk() - t0);
+            return value;
+        };
+    }
+
+    // Wrap a layout-forcing method. `fixedThis` pins the receiver for
+    // window-level functions; element methods keep their own `this`.
+    function measuredCall(original, name, fixedThis) {
+        return function () {
+            if (!armed()) {
+                return original.apply(fixedThis === undefined ? this : fixedThis, arguments);
+            }
+            var t0 = clk();
+            var value = original.apply(fixedThis === undefined ? this : fixedThis, arguments);
+            recordRead(name, clk() - t0);
+            return value;
+        };
     }
 
     // -----------------------------------------------------------------------
@@ -644,10 +854,7 @@ export function createLayoutProfiler(options) {
         var originalGet = desc.get;
         var originalSet = desc.set;
         var newDesc = {
-            get: function () {
-                onRead(name);
-                return originalGet.call(this);
-            },
+            get: measuredGet(originalGet, name),
             enumerable: desc.enumerable,
             configurable: true
         };
@@ -661,10 +868,8 @@ export function createLayoutProfiler(options) {
     // Patch getBoundingClientRect.
     function patchBCR() {
         var original = Element.prototype.getBoundingClientRect;
-        Element.prototype.getBoundingClientRect = function () {
-            onRead('getBoundingClientRect()');
-            return original.call(this);
-        };
+        Element.prototype.getBoundingClientRect =
+            measuredCall(original, 'getBoundingClientRect()');
         patches.push(function () {
             Element.prototype.getBoundingClientRect = original;
         });
@@ -675,10 +880,7 @@ export function createLayoutProfiler(options) {
         if (typeof window === 'undefined') return;
         var original = window.getComputedStyle;
         if (!original) return;
-        window.getComputedStyle = function () {
-            onRead('getComputedStyle()');
-            return original.apply(window, arguments);
-        };
+        window.getComputedStyle = measuredCall(original, 'getComputedStyle()', window);
         patches.push(function () { window.getComputedStyle = original; });
     }
 
@@ -694,10 +896,7 @@ export function createLayoutProfiler(options) {
             (function (name) {
                 var original = proto[name];
                 if (typeof original !== 'function') return;
-                proto[name] = function () {
-                    onRead(name + '()');
-                    return original.apply(this, arguments);
-                };
+                proto[name] = measuredCall(original, name + '()');
                 patches.push(function () { proto[name] = original; });
             }(names[i]));
         }
@@ -725,10 +924,7 @@ export function createLayoutProfiler(options) {
             (function (obj, name) {
                 var original = obj[name];
                 if (typeof original !== 'function') return;
-                obj[name] = function () {
-                    onRead(name + '()');
-                    return original.apply(this, arguments);
-                };
+                obj[name] = measuredCall(original, name + '()');
                 patches.push(function () { obj[name] = original; });
             }(targets[i][0], targets[i][1]));
         }
@@ -758,10 +954,7 @@ export function createLayoutProfiler(options) {
                 if (!desc || typeof desc.get !== 'function' || !desc.configurable) return;
                 var originalGet = desc.get;
                 Object.defineProperty(target, name, {
-                    get: function () {
-                        onRead(name);
-                        return originalGet.call(this);
-                    },
+                    get: measuredGet(originalGet, name),
                     set: desc.set,
                     enumerable: desc.enumerable,
                     configurable: true
@@ -862,7 +1055,10 @@ export function createLayoutProfiler(options) {
     }
 
     function reset() {
-        violations.length = 0;
+        for (var i = 0; i < cap; i++) ring[i] = undefined;
+        ringWrite = 0;
+        ringCount = 0;
+        violationsCache = null;
         violationCount = 0;
     }
 
@@ -879,11 +1075,22 @@ export function createLayoutProfiler(options) {
         var byWrite = {};
         var byTask = {};
         var records = [];
-        for (var i = 0; i < violations.length; i++) {
-            var v = violations[i];
+        var costs = [];
+        var totalMs = 0;
+        var maxMs = 0;
+        var unmeasured = 0;
+
+        forEachRecord(function (v) {
             byRead[v.read] = (byRead[v.read] || 0) + 1;
             byWrite[v.write] = (byWrite[v.write] || 0) + 1;
             byTask[v.taskId] = (byTask[v.taskId] || 0) + 1;
+            if (typeof v.costMs === 'number') {
+                costs.push(v.costMs);
+                totalMs += v.costMs;
+                if (v.costMs > maxMs) maxMs = v.costMs;
+            } else {
+                unmeasured++;
+            }
             records.push({
                 id: v.id,
                 taskId: v.taskId,
@@ -891,27 +1098,66 @@ export function createLayoutProfiler(options) {
                 write: v.write,
                 readSite: v.readSite,
                 writeSite: v.writeSite,
+                costMs: v.costMs,
+                belowGranularity: v.belowGranularity,
                 timestamp: v.timestamp
             });
+        });
+
+        // Percentiles over measured costs only. Sorting here is fine -- this
+        // is called once at gate time, never inside a frame.
+        var measured = costs.length;
+        var p99 = null;
+        if (measured > 0) {
+            costs.sort(function (a, b) { return a - b; });
+            var idx = Math.ceil(0.99 * measured) - 1;
+            if (idx < 0) idx = 0;
+            if (idx >= measured) idx = measured - 1;
+            p99 = costs[idx];
         }
+
         return {
             total: violationCount,
-            stored: violations.length,
+            stored: ringCount,
             // Set once the storage cap has dropped records. Any gate rule that
             // needs per-record data refuses to evaluate against a torn set.
-            truncated: violationCount > violations.length,
+            truncated: violationCount > ringCount,
             // Whether call sites are real. `ignoreSites` is unverifiable without them.
             stacks: captureStacks,
             byRead: byRead,
             byWrite: byWrite,
             byTask: byTask,
             taskCount: Object.keys(byTask).length,
+            // Every aggregate here is null rather than 0 when nothing was
+            // measured. A zero would read as "no stall"; the truth is "no
+            // number". resolutionMs null means the clock floor is unknown,
+            // so no cost could be claimed at all.
+            cost: {
+                resolutionMs: resolutionMs,
+                measured: measured,
+                unmeasured: unmeasured,
+                totalMs: measured > 0 ? totalMs : null,
+                maxMs: measured > 0 ? maxMs : null,
+                avgMs: measured > 0 ? totalMs / measured : null,
+                p99Ms: p99
+            },
             records: records
         };
     }
 
     return {
-        get violations() { return violations; },
+        // Chronological snapshot of the ring, cached until the next capture.
+        // v1.1 returned the live internal array; this returns a stable copy,
+        // so holding a reference across further reflows no longer mutates
+        // under you.
+        get violations() {
+            if (violationsCache === null) {
+                var out = [];
+                forEachRecord(function (v) { out.push(v); });
+                violationsCache = out;
+            }
+            return violationsCache;
+        },
         get violationCount() { return violationCount; },
         get active() { return active; },
         destroy: destroy,

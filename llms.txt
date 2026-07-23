@@ -1,6 +1,7 @@
 # @zakkster/lite-layout-profiler
 
-Dev-mode forced-reflow detector for DOM-binding code.
+Dev-mode forced-reflow detector and budget gate for DOM-binding code.
+Version 1.2.0. Zero dependencies. MIT (c) Zahary Shinikchiev.
 
 ## What it does
 
@@ -11,7 +12,8 @@ innerWidth / innerHeight / scrollX / scrollY / pageXOffset / pageYOffset)
 and DOM write methods (style.setProperty, every per-property style
 setter on CSSStyleDeclaration.prototype, className, appendChild,
 innerHTML, etc.). Flags read-after-write within the same synchronous
-task as a forced reflow violation.
+task as a forced reflow, times the stall it caused, and can fail a
+build over the result.
 
 Per-property style setters (`style.width = 'X'` etc.) are patched
 separately from `setProperty()` because in real browsers the WebIDL
@@ -22,28 +24,145 @@ Stack attribution requires unminified code or sourcemaps for readable
 readSite / writeSite. Set captureStacks: false to skip stack capture
 in busy environments.
 
+## Three lanes
+
+detect (1.0) -- record forced reflows with call-site attribution.
+gate   (1.1) -- checkNoReflow / assertNoReflow turn a run into pass/fail.
+cost   (1.2) -- time each stall; null when below the clock's granularity.
+
 ## API
 
 createLayoutProfiler(options?) -- start detecting.
-  options: maxViolations, onViolation, captureStacks, warnToConsole, ignorePatterns.
+  options: maxStored (default 200; maxViolations is the deprecated
+  pre-1.1 name for it), onViolation, captureStacks, warnToConsole,
+  ignorePatterns, measureCost (default true), clock.
 
-profiler.violations -- array of Violation objects.
-profiler.violationCount -- total count.
-profiler.summary() -- aggregate by read/write source.
+profiler.violations -- chronological snapshot of retained records, with stacks.
+profiler.violationCount -- exact total, even if the store was capped.
+profiler.summary() -- serialisable snapshot; the gate's input.
 profiler.destroy() -- unpatch all prototypes.
-profiler.reset() -- clear violations, keep active.
+profiler.reset() -- clear records, keep active.
+
+checkNoReflow(summary, rules?) -- returns a GateReport, never throws on breach.
+assertNoReflow(summary, rules?) -- throws ReflowBudgetError on breach.
+ReflowBudgetError -- carries .report and .violations.
+READ_NAMES -- closed vocabulary of read names this build can emit.
+VERSION -- '1.2.0'.
 
 ## Violation shape
 
-{ id, read, write, readSite, writeSite, readStack, writeStack, timestamp }
+{ id, taskId, read, write, readSite, writeSite, readStack, writeStack,
+  costMs, belowGranularity, timestamp }
+
+taskId is the epoch of the synchronous block, advanced by the microtask
+checkpoint that clears the dirty flag. Reflows sharing a taskId happened
+in one uninterrupted block.
+
+costMs is milliseconds spent inside the original getter, or null when
+unmeasurable. belowGranularity distinguishes "too fast to time" from
+"timing was off".
+
+## Summary shape
+
+{ total, stored, truncated, stacks, byRead, byWrite, byTask, taskCount,
+  cost: { resolutionMs, measured, unmeasured, totalMs, maxMs, avgMs, p99Ms },
+  records: [ lean records without stacks ] }
+
+Serialisable. Ship it out of the browser as JSON and gate it in a process
+that never saw the profiler.
+
+## Gate rules
+
+maxReflows      -- total counted reflows. Default 0.
+maxPerTask      -- worst single synchronous block.
+maxCostMs       -- worst single measured stall, ms.
+maxTotalCostMs  -- sum of measured stalls, ms.
+allowReads      -- exact read names to exclude, validated against READ_NAMES.
+allowWrites     -- write-source prefixes to exclude.
+ignoreSites     -- call-site substrings to exclude, matches readSite or writeSite.
+
+Report: { ok, verified, total, counted, excluded, excludedBy,
+          cost: { measured, unmeasured, totalMs, maxMs } | null,
+          violations: [{ metric, limit, actual, reason }] }
+
+The violation entry shape is shared with lite-gc-profiler's checkNoGc, so
+both profilers report to CI tooling in one vocabulary.
+
+## Fail-closed
+
+Every rule declares the evidence it needs. If the summary cannot supply
+it, the rule fails as unverifiable rather than passing, and verified
+goes false.
+
+  maxReflows                  needs summary.total       never unverifiable
+  maxPerTask                  needs complete records    fails if truncated
+  allowReads / allowWrites    needs complete records    fails if truncated
+  ignoreSites                 needs records + sites     also fails if captureStacks: false
+  maxCostMs / maxTotalCostMs  needs measured costs      fails if any counted reflow is unmeasured
+
+Zero counted reflows through a torn record set is not a clean run.
+maxReflows alone survives truncation, because total is kept independently
+of the storage ring: a capped run is gateable on volume, not on shape.
+
+Unknown rule keys throw TypeError with a did-you-mean hint rather than
+being ignored. Rules from unshipped lanes (maxInRaf, maxThrash,
+allowExpected) name their lane and version instead of guessing a
+spelling. allowReads entries are validated against READ_NAMES.
+
+## Null is not zero
+
+Browsers coarsen performance.now(): non-isolated Chrome clamps to 100us,
+Firefox to 1ms. A reflow shorter than that reads back as exactly 0, which
+is indistinguishable from free.
+
+The profiler probes the clock floor once at init (cost.resolutionMs). A
+stall must exceed MORE THAN ONE TICK to be recorded: a delta of exactly
+one tick means the true duration lies in (0, 2 x tick), an interval that
+contains zero, so it is not a lower bound at all. Anything at or below one
+tick is costMs: null with belowGranularity: true.
+
+Aggregates follow: with measured === 0, totalMs / maxMs / avgMs / p99Ms
+are all null, never 0. resolutionMs null means the floor could not be
+determined at all.
+
+Consequence: on a coarse-clocked browser, cost budgets do not apply and
+you gate on counts instead. You cannot pass a budget you could not measure.
+
+## ignorePatterns vs ignoreSites
+
+ignorePatterns (profiler option) drops a reflow at capture time -- never
+recorded, never in total.
+ignoreSites (gate rule) excludes an already-recorded reflow at gate time
+-- still in total, subtraction visible in excluded / excludedBy.
+
+Prefer ignoreSites so the number stays honest.
 
 ## Detection mechanism
 
-Write sets a dirty flag with queueMicrotask auto-clear.
-Read while dirty = forced reflow. Flag clears after first read
-(layout was recalculated). Next write re-dirties.
+Write sets a dirty flag with queueMicrotask auto-clear; the same
+checkpoint advances taskEpoch.
+Read while dirty = forced reflow. The read is timed across the original
+getter. Flag clears after the first flagged read (layout was
+recalculated). Next write re-dirties.
+
+Records live in a fixed-size ring, so overflow never moves an element.
+The newest maxStored records are retained.
+
+## CI-counting configuration
+
+createLayoutProfiler({ captureStacks: false, measureCost: false })
+-- no stack allocation, no timing. Cost rules become unverifiable;
+maxReflows and maxPerTask keep working.
 
 ## Dev-mode only
 
-Patches prototypes. Allocates per violation (Error.stack).
-NOT zero-GC. Ship behind __DEV__ flag or strip in production.
+Patches prototypes. Allocates per violation (record object, and
+Error.stack when captureStacks is on). NOT zero-GC. Ship behind a
+__DEV__ flag or strip in production.
+
+## Testing
+
+node --test 'test/*.test.mjs'
+01-detect, 02-gate, 03-gate-live, 04-cost, 05-cost-live. 100 tests.
+The live suites drive the real patcher against a stub DOM with an
+injected clock, so timer-resolution behaviour is deterministic.

@@ -1,5 +1,101 @@
 # Changelog
 
+## 1.2.0
+
+The cost lane. v1.1 could fail a build over a count; v1.2 can fail one over
+milliseconds -- and refuses to invent a number it could not measure.
+
+### Added
+
+- **Cost measurement.** Every forced read is now timed across the original
+  getter, so `costMs` is the stall itself and not the bookkeeping around it.
+  `Violation` gains `costMs: number | null` and `belowGranularity: boolean`.
+- **Timer resolution probe.** Runs once at init, budgeted to 2 ms and 8
+  samples. `summary().cost.resolutionMs` reports the clock floor, or `null`
+  when it could not be determined.
+- **`summary().cost`** -- `{ resolutionMs, measured, unmeasured, totalMs,
+  maxMs, avgMs, p99Ms }`. Percentiles are computed over measured costs only.
+- **Rules `maxCostMs` and `maxTotalCostMs`** -- worst single stall and total
+  stall, both evaluated after allowlist exclusions.
+- **`GateReport.cost`** -- `{ measured, unmeasured, totalMs, maxMs }` over
+  counted reflows, or `null` when the summary carried no records.
+- **`options.measureCost`** (default `true`) -- skips the init probe and the
+  two clock reads per violation. Pair with `captureStacks: false` for the
+  CI-counting configuration: no stack allocation, no timing, just counts.
+- **`options.clock`** -- a monotonic millisecond clock, defaulting to
+  `performance.now()`. For hosts without `performance`, and so tests can drive
+  a clock of known granularity rather than hoping the host's is coarse.
+
+### Changed
+
+- **Records live in a fixed-size ring.** v1.1 used a plain array with
+  `shift()` on overflow, which is O(N) per drop once full -- a real cost in
+  exactly the thrashing runs this tool is pointed at. The ring writes in place
+  and never moves an element. Retention is unchanged: the newest `maxStored`
+  records are kept.
+- **`profiler.violations` is now a stable snapshot**, cached until the next
+  capture, rather than the live internal array. Holding a reference across
+  further reflows no longer mutates under you.
+- `summary().records` carry `costMs` and `belowGranularity`.
+
+### Design notes
+
+**Null is not zero.** Browsers deliberately coarsen `performance.now()`: a
+non-isolated Chrome tab clamps to 100us, Firefox to 1ms by default. A reflow
+shorter than that reads back as exactly `0`, indistinguishable from free.
+
+A stall must exceed **more than one tick** to be recorded as a number. One
+tick is not a small measurement, it is an absent one: a delta of exactly one
+tick means the true duration lies somewhere in `(0, 2 x tick)`, an interval
+that contains zero, so it is not a lower bound at all. Only from two ticks up
+does the measurement carry a positive lower bound. Anything at or below one
+tick is `costMs: null` with `belowGranularity: true`.
+
+Aggregates follow the same rule. With `measured === 0`, `totalMs`, `maxMs`,
+`avgMs` and `p99Ms` are all `null`, never `0`.
+
+**Cost rules refuse to guess.** If any counted reflow carries no cost,
+`maxCostMs` and `maxTotalCostMs` fail as unverifiable rather than summing the
+nulls as zeroes -- otherwise a thousand sub-resolution stalls would slide
+under a millisecond budget. On a coarse-clocked browser this means cost
+budgets simply do not apply and you gate on counts instead. You cannot pass a
+budget you were never able to measure.
+
+The evidence matrix from 1.1 gains one row:
+
+| rule | needs | unverifiable when |
+| --- | --- | --- |
+| `maxReflows` | `summary.total` | never -- the count is exact |
+| `maxPerTask` | complete records | records truncated or absent |
+| `allowReads` / `allowWrites` | complete records | records truncated or absent |
+| `ignoreSites` | complete records + call sites | above, or `captureStacks: false` |
+| `maxCostMs` / `maxTotalCostMs` | measured costs | any counted reflow unmeasured |
+
+**Two budgets, two illnesses.** Fifty reflows of 0.2 ms is a different problem
+from one reflow of 12 ms, and only the second drops a frame on its own.
+`maxCostMs` and `maxTotalCostMs` are deliberately separate so a run can breach
+one while passing the other.
+
+### Testing
+
+100 tests, renumbered to the ecosystem `NN-name.test.mjs` convention:
+`01-detect`, `02-gate`, `03-gate-live`, `04-cost`, `05-cost-live`.
+`npm test` now runs `node --test 'test/*.test.mjs'`.
+
+The live cost suite drives the real patcher against a stub DOM with an
+injected clock, so timer-resolution behaviour is deterministic instead of
+depending on how fine the host's clock happens to be.
+
+### Docs
+
+- **COOKBOOK.md** added: 16 recipes in four tiers, plus the evidence matrix
+  and CI workflow diagrams.
+- README gains a Cost section; `llms.txt` rewritten for the three lanes.
+- The demo shows the cost lane and a live gate verdict with editable budgets.
+  Its own repaint is now deferred to a `requestAnimationFrame` and excluded via
+  `ignorePatterns`, so the profiler's UI writes cannot dirty layout inside the
+  task being measured.
+
 ## 1.1.0
 
 The gate lane. v1.0 could tell you a forced reflow happened; v1.1 can fail a
