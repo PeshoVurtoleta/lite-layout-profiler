@@ -1,7 +1,15 @@
 export declare const VERSION: string;
 
+/**
+ * The complete closed vocabulary of read names this build can emit.
+ * `allowReads` entries are validated against it.
+ */
+export declare const READ_NAMES: readonly string[];
+
 export interface Violation {
     id: number;
+    /** Epoch of the synchronous block this reflow occurred in. */
+    taskId: number;
     /** Layout getter that forced the reflow. */
     read: string;
     /** DOM write that dirtied layout. */
@@ -18,15 +26,38 @@ export interface Violation {
     timestamp: number;
 }
 
+/** A recorded reflow as carried in a summary: no stacks, JSON-safe. */
+export interface ViolationRecord {
+    id: number;
+    taskId: number;
+    read: string;
+    write: string;
+    readSite: string;
+    writeSite: string;
+    timestamp: number;
+}
+
 export interface ViolationSummary {
+    /** Exact number of reflows recorded, even if storage was capped. */
     total: number;
+    /** Number of records actually retained. */
     stored: number;
+    /** True when the storage cap dropped records. Poisons per-record rules. */
+    truncated: boolean;
+    /** Whether call sites are real. `ignoreSites` is unverifiable without them. */
+    stacks: boolean;
     byRead: Record<string, number>;
     byWrite: Record<string, number>;
+    byTask: Record<string, number>;
+    taskCount: number;
+    /** Snapshot of retained records. Serialisable; consumed by the gate. */
+    records: ViolationRecord[];
 }
 
 export interface LayoutProfilerOptions {
-    /** Max stored violations. Default 200. */
+    /** Max retained records. Default 200. */
+    maxStored?: number;
+    /** @deprecated Pre-1.1 name for `maxStored`. Still honoured. */
     maxViolations?: number;
     /** Called on each forced reflow. */
     onViolation?: (v: Violation) => void;
@@ -34,14 +65,14 @@ export interface LayoutProfilerOptions {
     captureStacks?: boolean;
     /** Log console.warn per violation. Default true. */
     warnToConsole?: boolean;
-    /** Stack frame substrings to ignore. */
+    /** Stack frame substrings to drop at capture time (never recorded). */
     ignorePatterns?: string[];
 }
 
 export interface LayoutProfiler {
-    /** All recorded violations. */
+    /** All recorded violations, with stacks. */
     readonly violations: Violation[];
-    /** Total violation count (may exceed stored if maxViolations capped). */
+    /** Total violation count (may exceed stored if the cap was hit). */
     readonly violationCount: number;
     /** Whether the profiler is active (false after destroy). */
     readonly active: boolean;
@@ -49,9 +80,75 @@ export interface LayoutProfiler {
     destroy(): void;
     /** Clear violations but keep profiler active. */
     reset(): void;
-    /** Aggregate violations by read property and write source. */
+    /** Serialisable snapshot for the gate. */
     summary(): ViolationSummary;
 }
+
+/**
+ * Reflow budget rules.
+ *
+ * Unknown keys throw a TypeError with a did-you-mean hint rather than being
+ * ignored: a misspelled rule is a rule that silently never fires.
+ */
+export interface ReflowRules {
+    /** Max counted reflows over the whole run. Default 0. */
+    maxReflows?: number;
+    /** Max counted reflows within any one synchronous block. Default unlimited. */
+    maxPerTask?: number;
+    /** Read names to exclude. Validated against READ_NAMES. Trailing `()` optional. */
+    allowReads?: string[];
+    /** Write sources to exclude. Prefix match. */
+    allowWrites?: string[];
+    /** Call-site substrings to exclude. Matches readSite or writeSite. */
+    ignoreSites?: string[];
+}
+
+/** One breached rule. Shape shared with lite-gc-profiler's checkNoGc. */
+export interface RuleViolation {
+    metric: string;
+    limit: number | null;
+    actual: number | string;
+    reason: string;
+}
+
+export interface GateReport {
+    /** True only if every rule passed and every rule was verifiable. */
+    ok: boolean;
+    /** False when a rule could not be evaluated from the supplied evidence. */
+    verified: boolean;
+    /** Raw recorded total, before exclusions. */
+    total: number;
+    /** Reflows counted against the budget, after exclusions. */
+    counted: number;
+    excluded: number;
+    excludedBy: { reads: number; writes: number; sites: number };
+    violations: RuleViolation[];
+}
+
+export declare class ReflowBudgetError extends Error {
+    readonly name: 'ReflowBudgetError';
+    readonly report: GateReport;
+    readonly violations: RuleViolation[];
+    constructor(report: GateReport);
+}
+
+/**
+ * Evaluate a recorded run against a reflow budget.
+ *
+ * Fail-closed: a rule that needs per-record data and cannot get it -- records
+ * truncated by the storage cap, or call sites absent because captureStacks was
+ * off -- fails as unverifiable rather than passing on incomplete evidence.
+ */
+export declare function checkNoReflow(
+    summary: ViolationSummary,
+    rules?: ReflowRules
+): GateReport;
+
+/** checkNoReflow, but throws ReflowBudgetError when the budget is breached. */
+export declare function assertNoReflow(
+    summary: ViolationSummary,
+    rules?: ReflowRules
+): GateReport;
 
 /**
  * Create a forced-reflow detector. Patches Element/HTMLElement prototypes
@@ -60,4 +157,6 @@ export interface LayoutProfiler {
  * Dev-mode only. NOT zero-GC (allocates per violation, captures stacks).
  * Ship behind a __DEV__ flag or strip from production builds.
  */
-export function createLayoutProfiler(options?: LayoutProfilerOptions): LayoutProfiler;
+export declare function createLayoutProfiler(
+    options?: LayoutProfilerOptions
+): LayoutProfiler;

@@ -70,6 +70,174 @@ el.style.width = (w + 10) + 'px';  // browser batches this
 
 Per-property style setters are patched separately from `setProperty()` because in real browsers the WebIDL per-property setters go through internal C++ that bypasses the JS-level `setProperty` method. Patching one does not catch the other; both are needed.
 
+## Gate
+
+Detection tells you a forced reflow happened. The gate decides whether the run
+passes.
+
+```js
+import { createLayoutProfiler, assertNoReflow } from '@zakkster/lite-layout-profiler';
+
+const profiler = createLayoutProfiler({ warnToConsole: false });
+
+await runTheInteraction();
+
+assertNoReflow(profiler.summary());   // throws ReflowBudgetError on any reflow
+profiler.destroy();
+```
+
+The default budget is zero. One forced reflow fails the run.
+
+```js
+import { checkNoReflow } from '@zakkster/lite-layout-profiler';
+
+const report = checkNoReflow(profiler.summary(), {
+    maxReflows: 0,                       // total, after exclusions (default 0)
+    maxPerTask: 1,                       // worst single synchronous block
+    allowReads: ['getBoundingClientRect'],
+    allowWrites: ['CSSStyleDeclaration.transform'],
+    ignoreSites: ['node_modules/gsap']
+});
+// -> { ok, verified, total, counted, excluded, excludedBy, violations }
+```
+
+`report.violations` entries are `{ metric, limit, actual, reason }` — the same
+shape `lite-gc-profiler`'s `checkNoGc` emits, so both profilers report to CI
+tooling in one vocabulary.
+
+### The differential
+
+Same element, same fifty style writes. The only difference is where the read
+sits:
+
+```
+THRASH  : reflows=50   tasks=1   worstTask=50   verified=true   -> gate FAILS
+BATCHED : reflows=0    tasks=0   worstTask=0    verified=true   -> gate PASSES
+```
+
+```js
+// THRASH: read after each write -- 50 synchronous layouts in one block
+for (let i = 0; i < 50; i++) {
+    el.style.width = i + 'px';
+    total += el.offsetWidth;
+}
+
+// BATCHED: read once up front -- none
+let w = el.offsetWidth;
+for (let i = 0; i < 50; i++) el.style.width = (w + i) + 'px';
+```
+
+`test/04-gate-live.test.js` asserts exactly this differential on every run.
+
+### Why `maxPerTask` exists
+
+Ten reflows spread across ten frames is a different illness from ten in one
+block. Every record carries a `taskId` — the epoch of the synchronous block it
+occurred in, advanced by the microtask checkpoint that clears the dirty flag —
+so the gate can name the pathology rather than just the volume:
+
+```
+maxPerTask: task #7 forced 3 reflows in one synchronous block, limit 1
+```
+
+### Fail-closed
+
+Every rule declares what evidence it needs. If the summary cannot supply it,
+the rule **fails as unverifiable** rather than passing on incomplete data, and
+`report.verified` goes false:
+
+| rule | needs | unverifiable when |
+| --- | --- | --- |
+| `maxReflows` | `summary.total` | never — the count is exact |
+| `maxPerTask` | complete records | records truncated or absent |
+| `allowReads` / `allowWrites` | complete records | records truncated or absent |
+| `ignoreSites` | complete records + call sites | above, or `captureStacks: false` |
+
+Zero counted reflows through a torn record set is not a clean run. If the
+storage cap dropped records, any rule that reasons about individual records
+refuses to evaluate — but `maxReflows` still gates exactly, because `total` is
+kept independently of the storage buffer. A capped run can be gated on volume,
+just not on shape.
+
+### Unknown rules throw
+
+A misspelled rule is a rule that silently never fires:
+
+```js
+checkNoReflow(summary, { maxReflow: 0 });
+// TypeError: Unknown gate rule `maxReflow`. Did you mean `maxReflows`?
+//            Known rules: maxReflows, maxPerTask, allowReads, allowWrites, ignoreSites.
+
+checkNoReflow(summary, { maxCostMs: 4 });
+// TypeError: Rule `maxCostMs` requires the cost lane (v1.2+). This build is 1.1.0.
+
+checkNoReflow(summary, { allowReads: ['offsetWidht'] });
+// TypeError: `allowReads` entry `offsetWidht` is not a read this build can emit.
+//            Did you mean `offsetWidth`? See the READ_NAMES export.
+```
+
+`allowReads` is validated against `READ_NAMES`, the closed vocabulary of reads
+this build instruments, derived from the same lists the patcher uses so it
+cannot drift. `allowWrites` is a prefix match — `'CSSStyleDeclaration.'` allows
+every style write. `ignoreSites` is a substring match against either call site.
+
+### `ignorePatterns` vs `ignoreSites`
+
+Both filter by call site; they act at different times and the difference
+matters when you read a report.
+
+- `ignorePatterns` (profiler option) drops a reflow **at capture time**. It is
+  never recorded and never appears in `total`.
+- `ignoreSites` (gate rule) excludes an **already-recorded** reflow at gate
+  time. It still appears in `total`, and the subtraction is auditable via
+  `report.excluded` and `report.excludedBy`.
+
+Prefer `ignoreSites` when you want the number to stay honest and the exclusion
+visible. Use `ignorePatterns` only to keep a known-noisy third party out of the
+buffer entirely.
+
+---
+
+## API additions
+
+### `checkNoReflow(summary, rules?)` → `GateReport`
+
+Evaluate a recorded run against a budget. Never throws on breach; throws
+`TypeError` on a malformed rule set.
+
+### `assertNoReflow(summary, rules?)` → `GateReport`
+
+Same, throwing `ReflowBudgetError` on breach. The error carries `.report` and
+`.violations`.
+
+### `READ_NAMES`
+
+`readonly string[]` — every read name this build can emit.
+
+### `LayoutProfiler` additions
+
+| Method / Property | Description |
+| --- | --- |
+| `summary()` | Now returns a serialisable snapshot: adds `truncated`, `stacks`, `byTask`, `taskCount`, `records` |
+
+### `Violation` additions
+
+| Field | Description |
+| --- | --- |
+| `taskId` | Epoch of the synchronous block this reflow occurred in |
+
+### Options
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `maxStored` | number | 200 | Cap on retained records |
+| `maxViolations` | number | 200 | **Deprecated** — pre-1.1 name for `maxStored`, still honoured |
+
+> The rename resolves a collision: the old option name meant "a buffer of 200",
+> while the gate rule of the same name means "a budget of zero". The gate rule
+> is `maxReflows`.
+
+
 ## API
 
 ### `createLayoutProfiler(options?)`

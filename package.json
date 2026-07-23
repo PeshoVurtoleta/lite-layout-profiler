@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-layout-profiler",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
   "description": "Dev-mode forced-reflow detector. Patches layout-triggering getters, tracks DOM writes, flags read-after-write within the same task, attributes to call site. The #1 silent frame killer, made visible.",
   "type": "module",
