@@ -1,8 +1,10 @@
 # @zakkster/lite-layout-profiler -- Torture Test Plan
 
-**Status:** 105 torture scenarios shipped in v1.2.0 across four slots
-(L1.5, L2.5, L3.5, L99.9). Axes A-I represented. They found 22 defects on
-first run, all fixed before release; the list is at the bottom.
+**Status:** 131 torture scenarios shipped across v1.2.0 and v1.3.0 (slots
+L1.5, L2.5, L3.5, L99.9, L4.5). Axes A-I from v1.2; the phase lane reuses
+A-E with lane-specific meanings. v1.2's suite found 22 defects on first
+run; v1.3's L4.5 found 1 (`phasesObserved` reporting intent rather than
+whether rAF actually wrapped). All fixed before release.
 
 Companion to the roadmap. The L-numbers slot into the lane they torture,
 so the adversarial code lands in the same session as the subsystem and
@@ -112,6 +114,30 @@ Every invalid storage cap, retention at cap-1/cap/cap+1, a hundred ring
 wraps, reset at every ring phase, a hundred thousand reflows, callbacks
 that read, write, throw, destroy, reset, summarise and gate from inside
 `onViolation`.
+
+### L4.5 -- Phase lane and thrash collapsing (v1.3.0)
+
+`test/torture/l4-5-phase.test.mjs` -- 26 scenarios. Axes A (6), B (5),
+C (4), D (6), E (5).
+
+The phase lane reuses the v1.2 axes with lane-specific meaning. A is the
+critical one: `maxInRaf` MUST be unverifiable on a run recorded without
+`{ phases: true }`, on a truncated run, on a pre-1.3 summary, and when
+`phasesObserved` is anything but strictly `true` -- claiming "no reflow in
+rAF" without having wrapped rAF is the phase analogue of certifying
+through a torn net. E is specific to this lane: the scheduler wrappers
+touch globals the whole page shares, so teardown must restore every one by
+identity (never deleting a foreign shim layered on top), a host with no
+schedulers must not throw under `{ phases: true }`, a throwing scheduled
+callback must not strand the phase stack, and `{ phases: false }` must
+leave every scheduler untouched.
+
+**The one defect L4.5 found:** `phasesObserved` reported the *intent*
+(`phases: true`) rather than whether `requestAnimationFrame` was actually
+wrapped. On a host without rAF -- a worker, an old runtime -- that made
+`maxInRaf` falsely verifiable: it would have returned a clean pass for a
+budget it could not actually check. Fixed to report the real wrap result,
+so `maxInRaf` stays unverifiable exactly when rAF was not watched.
 
 ---
 

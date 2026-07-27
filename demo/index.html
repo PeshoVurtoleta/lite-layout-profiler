@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>lite-layout-profiler 1.2.0 -- forced-reflow detector</title>
+<title>lite-layout-profiler 1.3.0 -- forced-reflow detector</title>
 <style>
   :root {
     --bg:        #05100a; --bg: oklch(0.16 0.03 165);
@@ -78,7 +78,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>lite-layout-profiler <span class="v">1.2.0 -- forced-reflow detector</span></h1>
+    <h1>lite-layout-profiler <span class="v">1.3.0 -- forced-reflow detector</span></h1>
     <p class="sub">
       Click the buttons to trigger layout thrashing patterns. The profiler patches
       <code>offsetWidth</code>, <code>getBoundingClientRect</code>, etc. and flags
@@ -105,6 +105,9 @@
           <button id="btnAppend" class="btn-bad">appendChild + read</button>
         </div>
         <div class="row-toolbar">
+          <button id="btnRaf" class="btn-bad">Reflow inside rAF (frame killer)</button>
+        </div>
+        <div class="row-toolbar">
           <button id="btnReset" class="btn-sec">Reset violations</button>
         </div>
       </div>
@@ -114,6 +117,25 @@
         <div class="counter zero" id="totalCount">0</div>
         <div class="note">total forced reflows detected</div>
         <div class="note" id="summaryDetail"></div>
+      </div>
+
+      <div class="card">
+        <h2>Phase lane</h2>
+        <div class="stat-grid">
+          <div class="stat"><span>raf</span><span id="pRaf">0</span></div>
+          <div class="stat"><span>timer</span><span id="pTimer">0</span></div>
+          <div class="stat"><span>microtask</span><span id="pMicro">0</span></div>
+          <div class="stat"><span>ro-callback</span><span id="pRo">0</span></div>
+          <div class="stat"><span>unknown</span><span id="pUnknown">0</span></div>
+          <div class="stat"><span>worst thrash</span><span id="pThrash">0</span></div>
+        </div>
+        <p class="note">
+          A reflow inside <code>requestAnimationFrame</code> stalls the exact frame
+          being painted -- gate those with <code>maxInRaf</code>. A repeated
+          read-after-write tuple in one block collapses into one
+          <code>thrash</code> group. <code>unknown</code> means a reflow fired
+          outside every wrapped scheduler -- never guessed as <code>raf</code>.
+        </p>
       </div>
 
       <div class="card">
@@ -141,6 +163,7 @@
           <label>maxReflows <input type="number" id="ruleReflows" min="0" value="0"></label>
           <label>maxPerTask <input type="number" id="rulePerTask" min="1" value="3"></label>
           <label>maxCostMs <input type="number" id="ruleCost" min="0" step="0.5" value="4"></label>
+          <label>maxInRaf <input type="number" id="ruleInRaf" min="0" value="0"></label>
         </fieldset>
         <div id="ruleList"></div>
       </div>
@@ -178,19 +201,39 @@ const $cMax = document.getElementById('cMax');
 const $cAvg = document.getElementById('cAvg');
 const $cP99 = document.getElementById('cP99');
 const $cRes = document.getElementById('cRes');
+const $pRaf = document.getElementById('pRaf');
+const $pTimer = document.getElementById('pTimer');
+const $pMicro = document.getElementById('pMicro');
+const $pRo = document.getElementById('pRo');
+const $pUnknown = document.getElementById('pUnknown');
+const $pThrash = document.getElementById('pThrash');
 const $verdict = document.getElementById('verdict');
 const $ruleList = document.getElementById('ruleList');
 const $ruleReflows = document.getElementById('ruleReflows');
 const $rulePerTask = document.getElementById('rulePerTask');
 const $ruleCost = document.getElementById('ruleCost');
+const $ruleInRaf = document.getElementById('ruleInRaf');
 
 // The profiler's own UI writes touch the DOM, which would dirty layout inside
 // the very task being measured. Two defences: attribution drops any frame from
 // this file, and the repaint is deferred to a rAF so it never lands mid-loop.
 const profiler = createLayoutProfiler({
     warnToConsole: true,
-    ignorePatterns: ['paint', 'demo/index.html'],
-    onViolation: schedulePaint
+    // NOTE: no ignorePatterns. The earlier demo shipped
+    // ignorePatterns: ['paint', 'demo/index.html'], which silently broke
+    // detection in a real browser: every stack frame there is a file URL, so
+    // 'demo/index.html' matched the demo's OWN button handlers and dropped
+    // every reflow -- the counter sat at 0 no matter what you clicked. And
+    // 'paint' was unnecessary: paint() below writes only textContent/className
+    // and reads no layout, so it forces no reflow and needs no filtering.
+    // Attribution filters must match the profiler's own frames precisely, never
+    // a substring of the page's own path.
+    onViolation: schedulePaint,
+    // v1.3: classify each reflow by scheduler so the demo can show which
+    // ones fire inside requestAnimationFrame (frame-killers). The demo's own
+    // repaint runs under rAF, but paint() reads no layout so it is never a
+    // violation regardless.
+    phases: true
 });
 
 let paintQueued = false;
@@ -221,8 +264,19 @@ function paint() {
     $totalCount.textContent = s.total;
     $totalCount.className = s.total === 0 ? 'counter zero' : 'counter';
 
-    const reads = Object.keys(s.byRead).map((k) => k + ': ' + s.byRead[k]).join(', ');
-    $summaryDetail.textContent = reads ? 'by read: ' + reads : '';
+    // If the patch net is incomplete, "0 reflows" means "the detector could
+    // not watch", not "the page is clean". Say so, loudly, instead of showing
+    // an ambiguous zero -- this is the whole point of the coverage lane.
+    if (!s.patched.complete) {
+        $summaryDetail.textContent = 'DETECTOR INCOMPLETE: ' + s.patched.failed +
+            ' target(s) could not be instrumented on this browser (' +
+            s.patched.failures.slice(0, 3).join(', ') + '). A 0 here is not a clean page.';
+        $summaryDetail.className = 'note null';
+    } else {
+        const reads = Object.keys(s.byRead).map((k) => k + ': ' + s.byRead[k]).join(', ');
+        $summaryDetail.textContent = reads ? 'by read: ' + reads : '';
+        $summaryDetail.className = 'note';
+    }
 
     setStat($cMeasured, s.cost.measured);
     setStat($cUnmeasured, s.cost.unmeasured);
@@ -233,10 +287,18 @@ function paint() {
     $cRes.textContent = s.cost.resolutionMs === null
         ? 'undeterminable' : s.cost.resolutionMs + ' ms';
 
+    $pRaf.textContent = s.phases.raf;
+    $pTimer.textContent = s.phases.timer;
+    $pMicro.textContent = s.phases.microtask;
+    $pRo.textContent = s.phases.roCallback;
+    $pUnknown.textContent = s.phases.unknown;
+    $pThrash.textContent = s.maxThrashCount;
+
     const report = checkNoReflow(s, {
         maxReflows: Number($ruleReflows.value) || 0,
         maxPerTask: Number($rulePerTask.value) || 1,
-        maxCostMs: Number($ruleCost.value) || 0
+        maxCostMs: Number($ruleCost.value) || 0,
+        maxInRaf: Number($ruleInRaf.value) || 0
     });
     if (report.ok) {
         $verdict.textContent = 'PASS';
@@ -312,6 +374,17 @@ document.getElementById('btnAppend').addEventListener('click', function () {
     child.remove();
 });
 
+document.getElementById('btnRaf').addEventListener('click', function () {
+    // The frame-killer: force layout INSIDE a requestAnimationFrame callback.
+    // The reflow stalls the exact frame the browser is trying to paint, so it
+    // is stamped phase 'raf' and trips maxInRaf even when maxReflows is loose.
+    requestAnimationFrame(function () {
+        $target.style.width = (80 + Math.random() * 80) + 'px';
+        void $target.offsetWidth;  // FORCED REFLOW during render
+        schedulePaint();
+    });
+});
+
 document.getElementById('btnReset').addEventListener('click', function () {
     profiler.reset();
     schedulePaint();
@@ -320,6 +393,7 @@ document.getElementById('btnReset').addEventListener('click', function () {
 $ruleReflows.addEventListener('input', schedulePaint);
 $rulePerTask.addEventListener('input', schedulePaint);
 $ruleCost.addEventListener('input', schedulePaint);
+$ruleInRaf.addEventListener('input', schedulePaint);
 
 schedulePaint();
 </script>

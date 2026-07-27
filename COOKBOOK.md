@@ -283,6 +283,103 @@ The reason names the task, so you can find every record sharing that
 
 ---
 
+## Recipe 2b: Failing only the reflows that kill a frame
+
+**Goal.** Let a migrating codebase keep some forced reflows, but fail the
+build the moment one lands inside `requestAnimationFrame` -- the only
+place a reflow is a guaranteed dropped frame.
+
+**Primitive.** `maxInRaf`, with `{ phases: true }`.
+
+**Code.**
+
+```js
+const profiler = createLayoutProfiler({ phases: true });   // opt-in
+
+await runTheAnimation();
+
+checkNoReflow(profiler.summary(), {
+    maxReflows: 50,     // tolerate a backlog elsewhere for now
+    maxInRaf: 0         // but zero during render
+});
+```
+
+**Reading the verdict.**
+
+```
+maxInRaf: 2 forced reflows inside requestAnimationFrame callbacks
+          (frame-killing), limit 0
+```
+
+`summary().phases` breaks the whole run down by scheduler, so you can see
+where the reflows actually live before deciding what to gate:
+
+```js
+// { raf: 2, timer: 9, microtask: 0, roCallback: 0, event: 0, unknown: 40, unobserved: 0 }
+```
+
+**Gotchas.**
+
+- **`phases` is opt-in.** Without `{ phases: true }`, `maxInRaf` is
+  *unverifiable*, not a pass -- you cannot claim "no reflow in rAF" if you
+  never wrapped rAF. Check `report.verified`, not just `report.ok`.
+- **`unknown` is honest, not a bug.** A reflow that fires outside every
+  wrapped scheduler (a native event handler, a framework's own scheduler)
+  is `unknown`. It is never guessed into `raf`.
+- **A worker or old runtime has no rAF.** There, `phasesObserved` is
+  `false` and `maxInRaf` stays unverifiable rather than falsely green.
+- Wrapping schedulers touches globals the whole page shares. Use `phases`
+  in tests and profiling runs, not in a build you ship.
+
+---
+
+## Recipe 2c: Catching a getter stuck in a loop
+
+**Goal.** Fail a read-after-write tuple that repeats inside one block --
+the `for (...) { el.style.x = ...; el.offsetWidth }` anti-pattern that
+forces layout every iteration.
+
+**Primitive.** `maxThrash` (no `phases` needed).
+
+**Code.**
+
+```js
+checkNoReflow(profiler.summary(), {
+    maxReflows: 500,    // the raw count may be large and that is fine
+    maxThrash: 1        // but no single tuple may repeat in a block
+});
+```
+
+**Reading the verdict.**
+
+```
+maxThrash: a read-after-write tuple repeated 1000 times in one block,
+           limit 1 (read `offsetWidth` after `CSSStyleDeclaration.width =`)
+```
+
+`summary().thrash` lists every collapsed loop, worst first, so 1000
+identical records become one line you can act on:
+
+```js
+summary().thrash[0];
+// { read: 'offsetWidth', write: 'CSSStyleDeclaration.width =',
+//   readSite: '...', count: 1000, costMs: 42.7, taskId: 3, ... }
+```
+
+**Gotchas.**
+
+- **`summary().records` still holds all 1000.** Collapsing is a separate,
+  additive `thrash` view; the raw records are what `maxReflows` counts, so
+  the two rules see consistent numbers.
+- **Collapsing is per task.** The same tuple recurring across frames is a
+  per-frame pattern -- that is `maxPerTask`'s job, not thrash.
+- **Distinct call sites do not collapse.** Two `offsetWidth` reads at
+  different lines in the same loop are two tuples, each with its own count.
+- `maxThrash`, like every per-record rule, is unverifiable on a truncated
+  run (raise `maxStored` or shrink the workload).
+
+---
+
 ## Recipe 3: Gating on milliseconds, not counts
 
 **Goal.** Prove no single forced layout stalls long enough to drop a

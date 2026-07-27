@@ -1,5 +1,87 @@
 # Changelog
 
+## 1.3.0
+
+The phase lane. v1.2 counts a forced reflow the same wherever it fires; v1.3
+knows a reflow inside `requestAnimationFrame` stalls the exact frame it is
+rendering, and lets you gate that separately from a merely-bad one in a timer.
+
+### Added
+
+- **Phase classification** (opt-in via `{ phases: true }`). Wraps the
+  schedulers -- `requestAnimationFrame`, `setTimeout`/`setInterval`,
+  `queueMicrotask`/`Promise.prototype.then`, `ResizeObserver` -- so each reflow
+  is stamped with the phase it fired under: `raf`, `timer`, `microtask`,
+  `ro-callback`, or `unknown`. Records gain `phase` and `roFeedback`; the
+  summary gains `phases` (per-phase counts), `phasesObserved`, `thrash`, and
+  `maxThrashCount`.
+- **Rule `maxInRaf`** -- max forced reflows inside rAF callbacks. `maxInRaf: 0`
+  is the "never force layout during render" assertion, the one with a hard
+  physical meaning (the browser cannot paint mid-rAF-block).
+- **Thrash collapsing** -- an identical `(read, write, readSite, writeSite,
+  taskId)` tuple repeating within one task folds into one `summary().thrash`
+  group with a `count`, so a getter read in a 10 000-iteration loop is one
+  finding, not 10 000. Rule **`maxThrash`** gates the worst collapsed count.
+  Does NOT require `{ phases: true }`.
+- **ResizeObserver feedback-loop detection** -- a reflow inside an RO callback
+  whose body already wrote layout (the self-perpetuating shape) is flagged
+  `roFeedback: true`.
+
+### Why phases are opt-in and fail-closed
+
+Wrapping `requestAnimationFrame` et al. touches globals every scheduled
+callback in the page runs through -- a broader footprint than the read/write
+prototype patches -- so it is off by default. With it off, every record is
+phase `'unobserved'` and `maxInRaf` gates as **unverifiable**, never a pass:
+you cannot assert "no reflow in rAF" if rAF was never watched. And
+`phasesObserved` reports whether `requestAnimationFrame` was *actually*
+wrapped, not merely whether the option was set -- on a host with no rAF (a
+worker, an older runtime) `maxInRaf` stays unverifiable rather than falsely
+green. A phase we did not wrap is reported as `'unknown'`, never guessed
+into `'raf'`.
+
+### Design notes
+
+- **`summary().records` stays the raw one-record-per-reflow view.** Collapsing
+  there would make `maxReflows` count groups instead of reflows; thrash is a
+  separate, additive `summary().thrash` field, and the gate's counting is
+  unchanged.
+- **Nested schedulers report the innermost active phase**, via a small phase
+  stack pushed/popped in a `finally` -- a throwing callback cannot strand the
+  phase, the same discipline the dirty flag learned in v1.2.
+- **Teardown restores every wrapped scheduler by identity**: a restore fires
+  only if the current binding is still our wrapper, so `destroy()` never
+  deletes a foreign scheduler shim layered on top. Wrappers are installed on
+  both the `globalThis` and `window` bindings when they differ, so an
+  unqualified `requestAnimationFrame(...)` and `window.requestAnimationFrame(...)`
+  both route through them.
+
+### Fixed (baseline corrections shipped with this release)
+
+These predate v1.3 and came in with the earlier double-patch recovery; a new
+release is the honest moment to correct them.
+
+- **VERSION mismatch.** HEAD shipped `package.json` at `1.2.1` while
+  `LayoutProfiler.js` reported `1.2.0`. There was no `1.2.1` changelog entry
+  or feature; this release supersedes that phantom bump.
+- **Duplicate test file.** `test/layout.test.mjs` was a byte-for-byte copy of
+  `test/01-detect.test.mjs` and was matched by the test glob, so the detect
+  suite ran twice and inflated the reported count. Removed.
+- **Stale pre-rename orphans.** `test/03-gate.test.js` and
+  `test/04-gate-live.test.js` were `.js` fossils from before the
+  `NN-name.test.mjs` rename -- not run by the glob, and one still asserted
+  `maxCostMs` was a future-lane rule (wrong since v1.2). Removed.
+
+### Testing
+
+254 tests. New: `test/06-phase.test.mjs` (22 standard-case) and
+`test/torture/l4-5-phase.test.mjs` (26 across axes A-E, including scheduler
+teardown by identity, a foreign shim layered on top, a host with no
+schedulers, and a throwing scheduled callback). The torture caught a real gap:
+`phasesObserved` originally reported intent (`phases: true`) rather than
+whether rAF actually wrapped, which would have made `maxInRaf` falsely
+verifiable on a rAF-less host.
+
 ## 1.2.0
 
 The cost lane. v1.1 could fail a build over a count; v1.2 can fail one over

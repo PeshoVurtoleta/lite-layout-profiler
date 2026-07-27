@@ -31,6 +31,11 @@ export interface Violation {
 }
 
 /** A recorded reflow as carried in a summary: no stacks, JSON-safe. */
+/** The scheduler a reflow fired under. 'unobserved' when phases:false; */
+/** 'unknown' when phases:true but no wrapped scheduler was active. */
+export type ReflowPhase =
+    'raf' | 'timer' | 'microtask' | 'ro-callback' | 'event' | 'unknown' | 'unobserved';
+
 export interface ViolationRecord {
     id: number;
     taskId: number;
@@ -40,7 +45,37 @@ export interface ViolationRecord {
     writeSite: string;
     costMs: number | null;
     belowGranularity: boolean;
+    /** The scheduler this reflow fired under (v1.3). */
+    phase: ReflowPhase;
+    /** True if inside a ResizeObserver callback that had already written (v1.3). */
+    roFeedback: boolean;
     timestamp: number;
+}
+
+/** Per-phase reflow counts over the whole run (v1.3). */
+export interface PhaseCounts {
+    raf: number;
+    timer: number;
+    microtask: number;
+    roCallback: number;
+    event: number;
+    unknown: number;
+    unobserved: number;
+}
+
+/** A collapsed read-after-write loop: identical tuple repeating in one task. */
+export interface ThrashGroup {
+    read: string;
+    write: string;
+    readSite: string;
+    writeSite: string;
+    taskId: number;
+    phase: ReflowPhase;
+    roFeedback: boolean;
+    count: number;
+    /** Sum of measured member costs, or null if none were measured. */
+    costMs: number | null;
+    unmeasuredMembers: number;
 }
 
 /** Cost aggregates. Every total is null, not zero, when nothing was measured. */
@@ -83,6 +118,14 @@ export interface ViolationSummary {
     byTask: Record<string, number>;
     taskCount: number;
     patched: PatchCoverage;
+    /** Per-phase reflow counts (v1.3). */
+    phases: PhaseCounts;
+    /** Whether requestAnimationFrame was actually wrapped -- what maxInRaf needs. */
+    phasesObserved: boolean;
+    /** Collapsed read-after-write loops (count > 1), worst first (v1.3). */
+    thrash: ThrashGroup[];
+    /** Worst collapsed count in any one task -- what maxThrash gates (v1.3). */
+    maxThrashCount: number;
     cost: CostSummary;
     /** Snapshot of retained records. Serialisable; consumed by the gate. */
     records: ViolationRecord[];
@@ -105,6 +148,14 @@ export interface LayoutProfilerOptions {
     warnToConsole?: boolean;
     /** Stack frame substrings to drop at capture time (never recorded). */
     ignorePatterns?: string[];
+    /**
+     * Wrap the schedulers (rAF, timers, microtask, ResizeObserver) so each
+     * reflow is attributed to the phase it fired under, enabling maxInRaf.
+     * Opt-in (default false): wrapping touches globals every callback runs
+     * through. With it off, every record is phase 'unobserved' and maxInRaf
+     * gates as unverifiable. Thrash collapsing does NOT require it.
+     */
+    phases?: boolean;
 }
 
 export interface LayoutProfiler {
@@ -137,6 +188,19 @@ export interface ReflowRules {
     maxCostMs?: number;
     /** Max total milliseconds across all counted reflows. Default unlimited. */
     maxTotalCostMs?: number;
+    /**
+     * Max forced reflows inside requestAnimationFrame callbacks (frame-killers).
+     * Default unlimited. Unverifiable unless the run was recorded with
+     * { phases: true } and rAF was present. maxInRaf: 0 is the "never force
+     * layout during render" assertion.
+     */
+    maxInRaf?: number;
+    /**
+     * Max times an identical (read, write, site, site) tuple may repeat within
+     * one task. Default unlimited. maxThrash: 1 forbids any read-after-write
+     * loop. Does not require { phases: true }.
+     */
+    maxThrash?: number;
     /** Read names to exclude. Validated against READ_NAMES. Trailing `()` optional. */
     allowReads?: string[];
     /** Write sources to exclude. Prefix match. */

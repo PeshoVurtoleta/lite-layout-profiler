@@ -1,4 +1,4 @@
-// @zakkster/lite-layout-profiler 1.2.0
+// @zakkster/lite-layout-profiler 1.3.0
 // Dev-mode forced-reflow detector. Patches layout-triggering getters on
 // Element/HTMLElement prototypes, tracks DOM writes that invalidate layout,
 // and flags read-after-write within the same synchronous task. Attributes
@@ -15,13 +15,22 @@
 // the clock's granularity is reported as null, never as zero. Cost rules
 // refuse to evaluate over unmeasured reflows.
 //
+// v1.3 adds the phase lane (opt-in via { phases: true }): each reflow is
+// classified by the scheduler it fired under -- raf, timer, microtask,
+// ro-callback, event -- so a frame-killing reflow inside requestAnimationFrame
+// can be gated separately (maxInRaf) from a merely-bad one inside a timer. A
+// phase we did not wrap is reported as 'unknown', never guessed. Thrash
+// collapsing folds an identical read-after-write tuple repeating within one
+// task into a single counted record (maxThrash), and ResizeObserver feedback
+// loops are flagged.
+//
 // NOT zero-GC. This is a diagnostic tool that allocates per violation.
 // Ship behind a __DEV__ flag or strip from production builds.
 //
 // Copyright (c) 2026 Zahary Shinikchiev <shinikchiev@yahoo.com>
 // MIT License
 
-export const VERSION = '1.2.0';
+export const VERSION = '1.3.0';
 
 // ---------------------------------------------------------------------------
 // Layout-triggering reads (the getters that force synchronous layout)
@@ -137,6 +146,7 @@ function parseStack(raw) {
         if (line.indexOf('onRead') >= 0) continue;
         if (line.indexOf('recordRead') >= 0) continue;
         if (line.indexOf('measuredGet') >= 0) continue;
+        if (line.indexOf('underPhase') >= 0) continue;
         if (line.indexOf('measuredCall') >= 0) continue;
         if (line.length > 0) return line;
     }
@@ -197,15 +207,18 @@ function probeResolution(budgetMs, clk) {
 
 const RULE_KEYS = [
     'maxReflows', 'maxPerTask', 'maxCostMs', 'maxTotalCostMs',
+    'maxInRaf', 'maxThrash',
     'allowReads', 'allowWrites', 'ignoreSites'
 ];
 
 // Rules that belong to lanes not yet shipped. Recognised so the error can say
 // what is actually wrong instead of offering a nonsense spelling suggestion.
 const FUTURE_RULE_KEYS = {
-    maxInRaf: ['1.3', 'phase lane'],
-    maxThrash: ['1.3', 'phase lane'],
-    allowExpected: ['1.5', 'expected-scope lane']
+    allowExpected: ['1.5', 'expected-scope lane'],
+    maxInTimer: ['later', 'a per-scheduler rule that is not yet gated separately -- '
+        + 'see summary().phases.timer for the count'],
+    maxInMicrotask: ['later', 'a per-scheduler rule that is not yet gated separately -- '
+        + 'see summary().phases.microtask for the count']
 };
 
 export class ReflowBudgetError extends Error {
@@ -352,6 +365,8 @@ function validateRules(rules) {
     if (rules.maxPerTask !== undefined) requireCount('maxPerTask', rules.maxPerTask);
     if (rules.maxCostMs !== undefined) requireCount('maxCostMs', rules.maxCostMs);
     if (rules.maxTotalCostMs !== undefined) requireCount('maxTotalCostMs', rules.maxTotalCostMs);
+    if (rules.maxInRaf !== undefined) requireCount('maxInRaf', rules.maxInRaf);
+    if (rules.maxThrash !== undefined) requireCount('maxThrash', rules.maxThrash);
     if (rules.allowReads !== undefined) requireStringList('allowReads', rules.allowReads);
     if (rules.allowWrites !== undefined) requireStringList('allowWrites', rules.allowWrites);
     if (rules.ignoreSites !== undefined) requireStringList('ignoreSites', rules.ignoreSites);
@@ -424,6 +439,8 @@ export function checkNoReflow(summary, rules) {
     var maxPerTask = r.maxPerTask === undefined ? Infinity : r.maxPerTask;
     var maxCostMs = r.maxCostMs === undefined ? Infinity : r.maxCostMs;
     var maxTotalCostMs = r.maxTotalCostMs === undefined ? Infinity : r.maxTotalCostMs;
+    var maxInRaf = r.maxInRaf === undefined ? Infinity : r.maxInRaf;
+    var maxThrash = r.maxThrash === undefined ? Infinity : r.maxThrash;
     var allowReads = r.allowReads || [];
     var allowWrites = r.allowWrites || [];
     var ignoreSites = r.ignoreSites || [];
@@ -470,9 +487,12 @@ export function checkNoReflow(summary, rules) {
     }
 
     var needsCost = maxCostMs !== Infinity || maxTotalCostMs !== Infinity;
+    var needsPhase = maxInRaf !== Infinity;
+    var needsThrash = maxThrash !== Infinity;
     var hasAllowlist =
         allowReads.length > 0 || allowWrites.length > 0 || ignoreSites.length > 0;
-    var needsRecords = hasAllowlist || maxPerTask !== Infinity || needsCost;
+    var needsRecords = hasAllowlist || maxPerTask !== Infinity || needsCost ||
+        needsPhase || needsThrash;
     var records = Array.isArray(summary.records) ? summary.records : null;
 
     // -- Evidence checks, before any counting --
@@ -654,6 +674,68 @@ export function checkNoReflow(summary, rules) {
         }
     }
 
+    // -- Phase lane (maxInRaf) --
+    //
+    // A reflow inside a requestAnimationFrame callback stalls the exact frame
+    // it is trying to render. maxInRaf: 0 asserts "never force layout during
+    // render". It is unverifiable if the phase wrappers were not installed:
+    // you cannot claim no reflow in rAF if rAF was never watched.
+    if (needsPhase && kept !== null) {
+        if (summary.phasesObserved !== true) {
+            unverifiable(out, 'maxInRaf', 'phases not observed',
+                'maxInRaf needs the phase lane, but this run was recorded ' +
+                'without it. Create the profiler with { phases: true }.');
+        } else {
+            var inRaf = 0;
+            for (var pk = 0; pk < kept.length; pk++) {
+                if (kept[pk].phase === 'raf') inRaf++;
+            }
+            if (inRaf > maxInRaf) {
+                out.ok = false;
+                out.violations.push({
+                    metric: 'maxInRaf',
+                    limit: maxInRaf,
+                    actual: inRaf,
+                    reason: 'maxInRaf: ' + inRaf + ' forced reflow' +
+                        (inRaf === 1 ? '' : 's') + ' inside requestAnimationFrame ' +
+                        'callbacks (frame-killing), limit ' + maxInRaf
+                });
+            }
+        }
+    }
+
+    // -- Thrash lane (maxThrash) --
+    //
+    // The worst collapsed (read, write, site, site, task) count. maxThrash: 1
+    // means no read-after-write tuple may repeat within a block -- the
+    // signature of a getter read in a loop. Uses the precomputed
+    // summary.maxThrashCount, which is derived from the same records; a
+    // truncated run makes it a floor, so it fails as unverifiable there
+    // (handled by the records-evidence checks above).
+    if (maxThrash !== Infinity) {
+        if (typeof summary.maxThrashCount !== 'number') {
+            unverifiable(out, 'maxThrash', 'no thrash data',
+                'maxThrash needs the collapsed thrash view, absent from this ' +
+                'summary (a pre-1.3 build?).');
+        } else if (out.verified) {
+            var worstThrash = summary.maxThrashCount;
+            if (worstThrash > maxThrash) {
+                out.ok = false;
+                var worstGroup = Array.isArray(summary.thrash) && summary.thrash.length > 0
+                    ? summary.thrash[0] : null;
+                out.violations.push({
+                    metric: 'maxThrash',
+                    limit: maxThrash,
+                    actual: worstThrash,
+                    reason: 'maxThrash: a read-after-write tuple repeated ' +
+                        worstThrash + ' times in one block, limit ' + maxThrash +
+                        (worstGroup ? ' (read `' + worstGroup.read + '` after `' +
+                            worstGroup.write + '`)' : '')
+                });
+            }
+        }
+    }
+
     return out;
 }
 
@@ -723,6 +805,10 @@ export function createLayoutProfiler(options) {
                     patched: { applied: 0, failed: 0, skipped: 0, complete: false,
                         failures: ['no DOM in this environment'] },
                     byRead: {}, byWrite: {}, byTask: {}, taskCount: 0,
+                    phases: { raf: 0, timer: 0, microtask: 0, roCallback: 0,
+                        event: 0, unknown: 0, unobserved: 0 },
+                    phasesObserved: false,
+                    thrash: [], maxThrashCount: 0,
                     cost: {
                         resolutionMs: null, measured: 0, unmeasured: 0,
                         totalMs: null, maxMs: null, avgMs: null, p99Ms: null
@@ -747,6 +833,15 @@ export function createLayoutProfiler(options) {
     var onViolation = typeof opts.onViolation === 'function' ? opts.onViolation : null;
     var captureStacks = opts.captureStacks !== false;
     var measureCost = opts.measureCost !== false;
+    // Phase lane (v1.3): wrap the schedulers so a reflow can be attributed to
+    // the callback it fired under (raf, timer, microtask, ro-callback). Opt-in,
+    // because wrapping requestAnimationFrame et al. touches globals other code
+    // depends on and adds a push/pop around every scheduled callback in the
+    // page, not just the ones that force layout -- a broader footprint than the
+    // read/write prototype patches. With it off, every record is phase
+    // 'unobserved' and maxInRaf gates as unverifiable: you cannot assert "no
+    // reflow in rAF" if you never watched rAF.
+    var trackPhases = opts.phases === true;
     // Monotonic millisecond clock. Defaults to performance.now(). Overridable
     // for environments without it, and so tests can drive a clock with known
     // granularity instead of hoping the host's happens to be coarse.
@@ -806,6 +901,26 @@ export function createLayoutProfiler(options) {
     // frames is a different illness from ten in one block.
     var taskEpoch = 0;
 
+    // Phase lane state (v1.3). currentPhase is the top of a small stack the
+    // scheduler wrappers push/pop. 'unobserved' is the value when phase
+    // tracking is off entirely; 'unknown' is the value when tracking is ON but
+    // the read fired outside any scheduler we wrapped (a foreign rAF shim, a
+    // native event dispatch we cannot see). The distinction matters: unobserved
+    // means "we did not look", unknown means "we looked and this path was not
+    // one we watch". Neither is ever guessed into 'raf'.
+    var phaseStack = [];
+    var currentPhase = trackPhases ? 'unknown' : 'unobserved';
+    var inRoCallback = false;   // true while a ResizeObserver callback runs
+    var roWroteThisCallback = false;
+
+    function pushPhase(name) {
+        phaseStack.push(currentPhase);
+        currentPhase = name;
+    }
+    function popPhase() {
+        currentPhase = phaseStack.length > 0 ? phaseStack.pop() : 'unknown';
+    }
+
     function scheduleClear() {
         if (cleanupScheduled) return;
         cleanupScheduled = true;
@@ -826,6 +941,10 @@ export function createLayoutProfiler(options) {
         dirty = source;
         dirtySource = source;
         if (captureStacks) dirtyStack = captureStack();
+        // If a write happens while a ResizeObserver callback is running, note
+        // it: a subsequent forced read in the same callback is the signature of
+        // an RO feedback loop (write -> layout dirty -> observer refires).
+        if (inRoCallback) roWroteThisCallback = true;
         scheduleClear();
     }
 
@@ -879,6 +998,21 @@ export function createLayoutProfiler(options) {
             writeStack: dirtyStack,
             costMs: costMs,
             belowGranularity: below,
+            // Phase lane (v1.3). The scheduler this read fired under. See the
+            // pushPhase/popPhase wrappers; 'unobserved' when phases:false.
+            phase: currentPhase,
+            // True when this reflow happened inside a ResizeObserver callback
+            // whose body had already written layout -- the shape of an RO
+            // feedback loop, where the write dirties layout and forces the
+            // observer to refire.
+            roFeedback: inRoCallback && roWroteThisCallback,
+            // Thrash-collapse fields. A raw record is always count 1; collapsing
+            // into groups with count > 1 happens at summary() time, never on
+            // this hot path (a map lookup per violation would defeat the ring).
+            count: 1,
+            firstTimestamp: 0,   // filled at summary time for collapsed groups
+            lastTimestamp: 0,
+            unmeasuredMembers: 0,
             timestamp: clk()
         };
 
@@ -1162,6 +1296,153 @@ export function createLayoutProfiler(options) {
         return true;
     }
 
+    // --- Phase-lane scheduler wrappers (v1.3) ------------------------------
+    //
+    // Each wraps a scheduler so currentPhase reflects the callback the user's
+    // code is running under. The restore is identity-checked (only unpatch our
+    // own wrapper) and the phase push/pop is in a finally, so neither a foreign
+    // shim installed on top nor a throwing callback can corrupt the state.
+
+    // Wrap one callback so it runs under `phaseName`. Shared by every scheduler.
+    function underPhase(cb, phaseName) {
+        if (typeof cb !== 'function') return cb;
+        return function () {
+            pushPhase(phaseName);
+            try {
+                return cb.apply(this, arguments);
+            } finally {
+                popPhase();
+            }
+        };
+    }
+
+    // Assign the same wrapper to every host binding that currently holds the
+    // original, so an unqualified `requestAnimationFrame(...)` (globalThis) and
+    // a `window.requestAnimationFrame(...)` both route through it. In a real
+    // browser window === globalThis and this is one assignment; under a test
+    // stub or a worker they can differ. Restore is identity-checked per host.
+    function patchGlobalFn(name, makeWrapper) {
+        var hosts = [];
+        if (typeof globalThis !== 'undefined') hosts.push(globalThis);
+        if (typeof window !== 'undefined' && window !== globalThis) hosts.push(window);
+        var original = null;
+        for (var h = 0; h < hosts.length; h++) {
+            if (typeof hosts[h][name] === 'function') { original = hosts[h][name]; break; }
+        }
+        if (original === null) return 'absent';
+        var wrapped = makeWrapper(original);
+        var touched = [];
+        for (var j = 0; j < hosts.length; j++) {
+            if (hosts[j][name] === original) {
+                hosts[j][name] = wrapped;
+                touched.push(hosts[j]);
+            }
+        }
+        if (touched.length === 0) return 'absent';
+        patches.push(function () {
+            for (var t = 0; t < touched.length; t++) {
+                if (touched[t][name] === wrapped) touched[t][name] = original;
+            }
+        });
+        return true;
+    }
+
+    function patchRaf() {
+        return patchGlobalFn('requestAnimationFrame', function (original) {
+            return function (cb) {
+                return original.call(this, underPhase(cb, 'raf'));
+            };
+        });
+    }
+
+    function patchTimers() {
+        var a = patchGlobalFn('setTimeout', function (original) {
+            return function (cb) {
+                if (typeof cb !== 'function') return original.apply(this, arguments);
+                var args = Array.prototype.slice.call(arguments);
+                args[0] = underPhase(cb, 'timer');
+                return original.apply(this, args);
+            };
+        });
+        var b = patchGlobalFn('setInterval', function (original) {
+            return function (cb) {
+                if (typeof cb !== 'function') return original.apply(this, arguments);
+                var args = Array.prototype.slice.call(arguments);
+                args[0] = underPhase(cb, 'timer');
+                return original.apply(this, args);
+            };
+        });
+        return (a === true || b === true) ? true : 'absent';
+    }
+
+    function patchMicrotask() {
+        var did = false;
+        var qm = patchGlobalFn('queueMicrotask', function (original) {
+            return function (cb) {
+                return original.call(this, underPhase(cb, 'microtask'));
+            };
+        });
+        if (qm === true) did = true;
+        // Promise.prototype.then -- the other common microtask source.
+        if (typeof Promise === 'function' && Promise.prototype &&
+                typeof Promise.prototype.then === 'function') {
+            var origThen = Promise.prototype.then;
+            var wrappedThen = function (onF, onR) {
+                return origThen.call(this, underPhase(onF, 'microtask'), underPhase(onR, 'microtask'));
+            };
+            Promise.prototype.then = wrappedThen;
+            patches.push(function () {
+                if (Promise.prototype.then === wrappedThen) Promise.prototype.then = origThen;
+            });
+            did = true;
+        }
+        return did ? true : 'absent';
+    }
+
+    function patchResizeObserver() {
+        var hosts = [];
+        if (typeof globalThis !== 'undefined') hosts.push(globalThis);
+        if (typeof window !== 'undefined' && window !== globalThis) hosts.push(window);
+        var OriginalRO = null;
+        for (var h = 0; h < hosts.length; h++) {
+            if (typeof hosts[h].ResizeObserver === 'function') { OriginalRO = hosts[h].ResizeObserver; break; }
+        }
+        if (OriginalRO === null) return 'absent';
+        function WrappedRO(cb) {
+            var wrappedCb = typeof cb === 'function'
+                ? function () {
+                    var prevIn = inRoCallback;
+                    var prevWrote = roWroteThisCallback;
+                    inRoCallback = true;
+                    roWroteThisCallback = false;
+                    pushPhase('ro-callback');
+                    try {
+                        return cb.apply(this, arguments);
+                    } finally {
+                        popPhase();
+                        inRoCallback = prevIn;
+                        roWroteThisCallback = prevWrote;
+                    }
+                }
+                : cb;
+            return new OriginalRO(wrappedCb);
+        }
+        WrappedRO.prototype = OriginalRO.prototype;
+        var touched = [];
+        for (var j = 0; j < hosts.length; j++) {
+            if (hosts[j].ResizeObserver === OriginalRO) {
+                hosts[j].ResizeObserver = WrappedRO;
+                touched.push(hosts[j]);
+            }
+        }
+        patches.push(function () {
+            for (var t = 0; t < touched.length; t++) {
+                if (touched[t].ResizeObserver === WrappedRO) touched[t].ResizeObserver = OriginalRO;
+            }
+        });
+        return true;
+    }
+
     // Patch every per-property setter on CSSStyleDeclaration.prototype so we
     // catch `el.style.width = 'X'` and similar direct assignments.
     //
@@ -1263,6 +1544,23 @@ export function createLayoutProfiler(options) {
     attempt('read:scrollMethods', patchScrollMethods);
     attempt('read:windowMetrics', patchWindowMetrics);
 
+    // Phase lane wrappers (v1.3), only when opted in. Each sets currentPhase
+    // for the duration of a scheduled callback, in a finally so a throwing
+    // callback cannot strand the phase.
+    //
+    // rafObserved tracks whether the rAF wrapper SPECIFICALLY installed, which
+    // is what maxInRaf actually depends on. `phases: true` is the intent, but
+    // if requestAnimationFrame is absent from this host (a worker, an older
+    // runtime) the rule is still unverifiable -- you cannot claim "no reflow in
+    // rAF" on a host with no rAF. phasesObserved reports this truth, not intent.
+    var rafObserved = false;
+    if (trackPhases) {
+        rafObserved = attempt('phase:raf', patchRaf) === true;
+        attempt('phase:timers', patchTimers);
+        attempt('phase:microtask', patchMicrotask);
+        attempt('phase:resizeObserver', patchResizeObserver);
+    }
+
     // -----------------------------------------------------------------------
     // Public surface
     // -----------------------------------------------------------------------
@@ -1311,10 +1609,30 @@ export function createLayoutProfiler(options) {
         var maxMs = 0;
         var unmeasured = 0;
 
+        // Phase counts over the whole run (v1.3).
+        var phaseCounts = {
+            raf: 0, timer: 0, microtask: 0, roCallback: 0,
+            event: 0, unknown: 0, unobserved: 0
+        };
+        // Thrash collapsing: fold identical (read, write, readSite, writeSite,
+        // taskId) tuples into one group carrying a count. Keyed by that tuple;
+        // the first occurrence is the canonical record. Done here, once, over
+        // the retained ring -- never on the hot path.
+        var thrashGroups = {};
+        var thrashOrder = [];
+
+        function phaseKey(p) {
+            if (p === 'ro-callback') return 'roCallback';
+            if (Object.prototype.hasOwnProperty.call(phaseCounts, p)) return p;
+            return 'unknown';
+        }
+
         forEachRecord(function (v) {
             byRead[v.read] = (byRead[v.read] || 0) + 1;
             byWrite[v.write] = (byWrite[v.write] || 0) + 1;
             byTask[v.taskId] = (byTask[v.taskId] || 0) + 1;
+            phaseCounts[phaseKey(v.phase)]++;
+
             if (isMeasuredCost(v.costMs)) {
                 costs.push(v.costMs);
                 totalMs += v.costMs;
@@ -1322,6 +1640,12 @@ export function createLayoutProfiler(options) {
             } else {
                 unmeasured++;
             }
+
+            // summary.records stays the RAW one-record-per-reflow view, so the
+            // gate's counting (maxReflows, maxPerTask, cost) remains exactly
+            // correct -- collapsing here would make maxReflows count groups
+            // instead of reflows. Thrash is a SEPARATE, additive view built
+            // alongside, never a replacement.
             records.push({
                 id: v.id,
                 taskId: v.taskId,
@@ -1329,11 +1653,67 @@ export function createLayoutProfiler(options) {
                 write: v.write,
                 readSite: v.readSite,
                 writeSite: v.writeSite,
+                phase: v.phase,
+                roFeedback: v.roFeedback,
                 costMs: v.costMs,
                 belowGranularity: v.belowGranularity,
                 timestamp: v.timestamp
             });
+
+            // Collapse key. taskId is part of it: a tuple recurring ACROSS
+            // tasks is a per-frame pattern (maxPerTask's job), not a
+            // within-block loop.
+            var key = v.taskId + '\u0000' + v.read + '\u0000' + v.write +
+                '\u0000' + v.readSite + '\u0000' + v.writeSite;
+            var g = thrashGroups[key];
+            if (g === undefined) {
+                g = {
+                    read: v.read,
+                    write: v.write,
+                    readSite: v.readSite,
+                    writeSite: v.writeSite,
+                    taskId: v.taskId,
+                    phase: v.phase,
+                    roFeedback: v.roFeedback,
+                    count: 0,
+                    costMs: null,
+                    unmeasuredMembers: 0
+                };
+                thrashGroups[key] = g;
+                thrashOrder.push(g);
+            }
+            g.count++;
+            if (isMeasuredCost(v.costMs)) g.costMs = (g.costMs || 0) + v.costMs;
+            else g.unmeasuredMembers++;
+            if (v.roFeedback) g.roFeedback = true;
         });
+
+        // Thrash list: collapsed groups with count > 1, worst first.
+        var thrash = [];
+        for (var gi = 0; gi < thrashOrder.length; gi++) {
+            var grp = thrashOrder[gi];
+            if (grp.count > 1) {
+                thrash.push({
+                    read: grp.read,
+                    write: grp.write,
+                    readSite: grp.readSite,
+                    writeSite: grp.writeSite,
+                    taskId: grp.taskId,
+                    phase: grp.phase,
+                    roFeedback: grp.roFeedback,
+                    count: grp.count,
+                    costMs: grp.costMs,
+                    unmeasuredMembers: grp.unmeasuredMembers
+                });
+            }
+        }
+        thrash.sort(function (a, b) { return b.count - a.count; });
+
+        // Worst collapsed count in any one task -- what maxThrash gates.
+        var maxThrashCount = 0;
+        for (var ti = 0; ti < thrash.length; ti++) {
+            if (thrash[ti].count > maxThrashCount) maxThrashCount = thrash[ti].count;
+        }
 
         // Percentiles over measured costs only. Sorting here is fine -- this
         // is called once at gate time, never inside a frame.
@@ -1369,6 +1749,16 @@ export function createLayoutProfiler(options) {
             byWrite: byWrite,
             byTask: byTask,
             taskCount: Object.keys(byTask).length,
+            // Phase lane (v1.3). Counts per scheduler over the whole run, and
+            // whether the phase wrappers were installed at all. maxInRaf is
+            // unverifiable when phasesObserved is false: you cannot assert
+            // "no reflow in rAF" if rAF was never watched.
+            phases: phaseCounts,
+            phasesObserved: rafObserved,
+            // Collapsed read-after-write loops (count > 1), worst first, plus
+            // the worst single count for maxThrash to gate.
+            thrash: thrash,
+            maxThrashCount: maxThrashCount,
             // Every aggregate here is null rather than 0 when nothing was
             // measured. A zero would read as "no stall"; the truth is "no
             // number". resolutionMs null means the clock floor is unknown,

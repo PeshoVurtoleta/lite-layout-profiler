@@ -88,6 +88,10 @@ export function makeRecord(over) {
         writeSite: '  at resizeHandler (app.js:38:5)',
         costMs: 1,
         belowGranularity: false,
+        // v1.3 phase-lane fields. Default 'unobserved' so pre-phase tests
+        // (which never set phase) describe a run recorded with phases off.
+        phase: 'unobserved',
+        roFeedback: false,
         timestamp: 0
     }, over);
 }
@@ -98,6 +102,8 @@ export function makeSummary(records, over) {
     const byRead = {}, byWrite = {}, byTask = {};
     const costs = [];
     let unmeasured = 0;
+    const phases = { raf: 0, timer: 0, microtask: 0, roCallback: 0, event: 0, unknown: 0, unobserved: 0 };
+    const groups = new Map();
     for (const r of list) {
         if (r === null || typeof r !== 'object') continue;
         byRead[r.read] = (byRead[r.read] || 0) + 1;
@@ -108,9 +114,22 @@ export function makeSummary(records, over) {
         } else {
             unmeasured++;
         }
+        const pk = r.phase === 'ro-callback' ? 'roCallback'
+            : (Object.prototype.hasOwnProperty.call(phases, r.phase) ? r.phase : 'unknown');
+        phases[pk]++;
+        const key = r.taskId + '\u0000' + r.read + '\u0000' + r.write +
+            '\u0000' + r.readSite + '\u0000' + r.writeSite;
+        const g = groups.get(key) || { count: 0, read: r.read, write: r.write,
+            readSite: r.readSite, writeSite: r.writeSite, taskId: r.taskId, phase: r.phase };
+        g.count++;
+        groups.set(key, g);
     }
     const measured = costs.length;
     const total = costs.reduce((a, b) => a + b, 0);
+    const thrash = [];
+    for (const g of groups.values()) if (g.count > 1) thrash.push(g);
+    thrash.sort((a, b) => b.count - a.count);
+    const maxThrashCount = thrash.length > 0 ? thrash[0].count : 0;
     return Object.assign({
         total: list.length,
         stored: list.length,
@@ -118,6 +137,12 @@ export function makeSummary(records, over) {
         stacks: true,
         byRead, byWrite, byTask,
         taskCount: Object.keys(byTask).length,
+        // v1.3 fields. phasesObserved defaults false (records default to
+        // 'unobserved'); a scenario testing maxInRaf sets it true explicitly.
+        phases,
+        phasesObserved: false,
+        thrash,
+        maxThrashCount,
         cost: {
             resolutionMs: 0.1,
             measured,

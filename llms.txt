@@ -1,7 +1,7 @@
 # @zakkster/lite-layout-profiler
 
 Dev-mode forced-reflow detector and budget gate for DOM-binding code.
-Version 1.2.0. Zero dependencies. MIT (c) Zahary Shinikchiev.
+Version 1.3.0. Zero dependencies. MIT (c) Zahary Shinikchiev.
 
 ## What it does
 
@@ -29,6 +29,10 @@ in busy environments.
 detect (1.0) -- record forced reflows with call-site attribution.
 gate   (1.1) -- checkNoReflow / assertNoReflow turn a run into pass/fail.
 cost   (1.2) -- time each stall; null when below the clock's granularity.
+phase  (1.3) -- classify each reflow by scheduler (raf/timer/microtask/
+               ro-callback); gate frame-killers via maxInRaf. Opt-in via
+               { phases: true }. Thrash collapsing folds a repeated
+               read-after-write tuple into one counted group (maxThrash).
 
 ## API
 
@@ -49,12 +53,18 @@ checkNoReflow(summary, rules?) -- returns a GateReport, never throws on breach.
 assertNoReflow(summary, rules?) -- throws ReflowBudgetError on breach.
 ReflowBudgetError -- carries .report and .violations.
 READ_NAMES -- closed vocabulary of read names this build can emit.
-VERSION -- '1.2.0'.
+VERSION -- '1.3.0'.
 
 ## Violation shape
 
 { id, taskId, read, write, readSite, writeSite, readStack, writeStack,
-  costMs, belowGranularity, timestamp }
+  costMs, belowGranularity, phase, roFeedback, timestamp }
+
+phase is the scheduler the reflow fired under (v1.3): raf | timer |
+microtask | ro-callback | unknown | unobserved. 'unobserved' means phases
+were off; 'unknown' means phases were on but no wrapped scheduler was
+active -- never guessed into raf. roFeedback is true inside a
+ResizeObserver callback that had already written layout.
 
 taskId is the epoch of the synchronous block, advanced by the microtask
 checkpoint that clears the dirty flag. Reflows sharing a taskId happened
@@ -68,8 +78,15 @@ unmeasurable. belowGranularity distinguishes "too fast to time" from
 
 { total, stored, truncated, stacks, byRead, byWrite, byTask, taskCount,
   patched: { applied, failed, skipped, complete, failures },
+  phases: { raf, timer, microtask, roCallback, event, unknown, unobserved },
+  phasesObserved,        -- was requestAnimationFrame actually wrapped
+  thrash: [ { read, write, taskId, phase, count, costMs } ... ],  -- count>1
+  maxThrashCount,        -- worst collapsed count, what maxThrash gates
   cost: { resolutionMs, measured, unmeasured, totalMs, maxMs, avgMs, p99Ms },
   records: [ lean records without stacks ] }
+
+summary.records stays the RAW one-per-reflow view so the gate's counting
+is unchanged; thrash is a separate, additive collapsed view.
 
 Serialisable. Ship it out of the browser as JSON and gate it in a process
 that never saw the profiler.
@@ -80,6 +97,9 @@ maxReflows      -- total counted reflows. Default 0.
 maxPerTask      -- worst single synchronous block.
 maxCostMs       -- worst single measured stall, ms.
 maxTotalCostMs  -- sum of measured stalls, ms.
+maxInRaf        -- forced reflows inside rAF callbacks (frame-killers).
+                   Needs { phases: true } + rAF present, else unverifiable.
+maxThrash       -- worst collapsed read-after-write count in any one task.
 allowReads      -- exact read names to exclude, validated against READ_NAMES.
 allowWrites     -- write-source prefixes to exclude.
 ignoreSites     -- call-site substrings to exclude, matches readSite or writeSite.
@@ -103,6 +123,8 @@ goes false.
   allowReads / allowWrites    needs complete records    fails if truncated
   ignoreSites                 needs records + sites     also fails if captureStacks: false
   maxCostMs / maxTotalCostMs  needs measured costs      fails if any counted reflow is unmeasured
+  maxInRaf                    needs phasesObserved      fails if phases were off or rAF absent
+  maxThrash                   needs complete records    fails if truncated
 
 Zero counted reflows through a torn record set is not a clean run.
 maxReflows alone survives truncation, because total is kept independently
@@ -140,6 +162,13 @@ ignoreSites (gate rule) excludes an already-recorded reflow at gate time
 -- still in total, subtraction visible in excluded / excludedBy.
 
 Prefer ignoreSites so the number stays honest.
+
+WARNING: ignorePatterns is a raw substring match against the captured
+stack. In a browser every frame is a file URL, so a pattern like
+'index.html' or 'app' matches your own code's frames and silently drops
+every reflow -- counter stuck at 0. Target a dependency path
+('node_modules/gsap'), never a generic word or your own file path. Node
+stacks often lack URLs, so this hides in tests and only bites in Chrome.
 
 ## Detection mechanism
 

@@ -203,7 +203,15 @@ Prefer `ignoreSites` when you want the number to stay honest and the exclusion
 visible. Use `ignorePatterns` only to keep a known-noisy third party out of the
 buffer entirely.
 
----
+> **A sharp edge worth stating plainly.** `ignorePatterns` matches a raw
+> substring against the reflow's captured stack. In a real browser every stack
+> frame is a file URL -- `at handler (https://host/app/index.html:42:9)` -- so
+> a pattern is tested against your own file paths too. A pattern like
+> `'index.html'` or `'app'` will match *every* reflow your own code triggers
+> and silently drop all of them, leaving the counter at `0` no matter what the
+> page does. Target a specific dependency path (`'node_modules/gsap'`), never a
+> generic word or your own file's path. (Node/jsdom stacks often omit URLs,
+> which is how this mistake hides in a test suite and only surfaces in Chrome.)
 
 ## Cost
 
@@ -275,6 +283,68 @@ createLayoutProfiler({ captureStacks: false, measureCost: false });
 That pair is the CI-counting configuration: no stack allocation, no timing,
 just the numbers `maxReflows` and `maxPerTask` need.
 
+## Phase
+
+A forced reflow is bad everywhere, but not equally. Inside a
+`requestAnimationFrame` callback it stalls the exact frame the browser is
+trying to paint -- a guaranteed dropped frame. Inside a `setTimeout` it is bad
+but not frame-fatal. The phase lane tells them apart.
+
+```js
+const profiler = createLayoutProfiler({ phases: true });   // opt-in
+
+// ... run the interaction ...
+
+assertNoReflow(profiler.summary(), {
+    maxReflows: 50,     // some reflows are tolerable while you migrate
+    maxInRaf: 0         // but NONE during render
+});
+```
+
+`{ phases: true }` wraps the schedulers -- `requestAnimationFrame`,
+`setTimeout`/`setInterval`, `queueMicrotask`/`Promise.then`, `ResizeObserver`
+-- so every reflow is stamped with the phase it fired under:
+
+```js
+profiler.summary().phases;
+// { raf: 3, timer: 1, microtask: 0, roCallback: 0, event: 0, unknown: 12, unobserved: 0 }
+```
+
+### Opt-in, and honest when off
+
+Wrapping the schedulers touches globals every scheduled callback in the page
+runs through -- broader than the read/write patching -- so it is off by
+default. With it off, every record is phase `unobserved` and `maxInRaf` gates
+as **unverifiable**, never a pass: you cannot assert "no reflow in rAF" if you
+never watched rAF. `phasesObserved` reports whether `requestAnimationFrame` was
+*actually* wrapped, so on a host without rAF (a worker, an old runtime)
+`maxInRaf` stays unverifiable rather than falsely green. A reflow that fires
+with no wrapped scheduler active is phase `unknown` -- the honest answer, never
+guessed into `raf`.
+
+### Thrash collapsing
+
+A getter read in a loop forces one reflow per iteration and would otherwise
+produce thousands of near-identical records. The phase lane folds an identical
+`(read, write, readSite, writeSite)` tuple repeating within one task into a
+single `summary().thrash` group with a `count`:
+
+```js
+for (let i = 0; i < 1000; i++) { el.style.width = i + 'px'; void el.offsetWidth; }
+// summary().thrash -> [{ read: 'offsetWidth', ..., count: 1000 }]
+// summary().records still has all 1000 (the raw view the gate counts)
+```
+
+`maxThrash: 1` forbids any read-after-write tuple from repeating within a
+block -- the signature of a layout read stuck in a loop. Thrash collapsing does
+**not** require `{ phases: true }`; it reads the call sites already recorded.
+
+### ResizeObserver feedback loops
+
+An RO callback that writes layout, dirties, and forces the observer to refire
+is a self-perpetuating stall. A reflow inside such a callback is flagged
+`roFeedback: true` on its record and thrash group.
+
 ## API additions
 
 ### `checkNoReflow(summary, rules?)` -> `GateReport`
@@ -297,6 +367,17 @@ Same, throwing `ReflowBudgetError` on breach. The error carries `.report` and
 Both are evaluated after allowlist exclusions, and both fail as unverifiable
 if any counted reflow is unmeasured.
 
+### Phase rules
+
+| Rule | Gates | Needs |
+| --- | --- | --- |
+| `maxInRaf` | forced reflows inside rAF callbacks | `{ phases: true }` + rAF present |
+| `maxThrash` | worst collapsed read-after-write count in any task | complete records |
+
+`maxInRaf` counts after allowlist exclusions and is unverifiable when the phase
+lane was off. `maxThrash` needs no wrappers but, like every per-record rule,
+fails as unverifiable on a truncated run.
+
 ### `READ_NAMES`
 
 `readonly string[]` -- every read name this build can emit.
@@ -314,6 +395,8 @@ if any counted reflow is unmeasured.
 | `taskId` | Epoch of the synchronous block this reflow occurred in |
 | `costMs` | Milliseconds spent inside the forced layout, or `null` if unmeasurable |
 | `belowGranularity` | True when the stall did not clear the clock's granularity |
+| `phase` | Scheduler the reflow fired under: `raf`/`timer`/`microtask`/`ro-callback`/`unknown`/`unobserved` |
+| `roFeedback` | True if inside a ResizeObserver callback that had already written |
 
 ### Options
 
@@ -323,6 +406,7 @@ if any counted reflow is unmeasured.
 | `maxViolations` | number | 200 | **Deprecated** -- pre-1.1 name for `maxStored`, still honoured |
 | `measureCost` | boolean | true | Time each reflow and probe the clock floor at init |
 | `clock` | function | `performance.now` | Monotonic ms clock, for hosts without `performance` |
+| `phases` | boolean | false | Wrap schedulers to classify each reflow by phase (enables `maxInRaf`) |
 
 > The rename resolves a collision: the old option name meant "a buffer of 200",
 > while the gate rule of the same name means "a budget of zero". The gate rule
