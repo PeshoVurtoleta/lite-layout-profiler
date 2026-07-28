@@ -98,8 +98,28 @@ export interface PatchCoverage {
     failed: number;
     /** Targets absent from this host. Not a hole: nothing can flow through them. */
     skipped: number;
-    /** False when at least one present target could not be instrumented. */
+    /**
+     * Targets verifiably already wrapped by another lite-layout-profiler
+     * instance when we instrumented (v1.4). We still wrap on top and detect
+     * reflows, but we do not cleanly own the path, so coverage is not complete.
+     * Only BRANDED foreign patches are counted -- an unbranded pre-existing
+     * wrapper cannot be told apart from a host's pristine impl by inspection.
+     */
+    foreign: number;
+    /**
+     * False when at least one present target could not be instrumented OR was
+     * verifiably foreign-wrapped. The gate's "incomplete coverage ->
+     * unverifiable" path consumes this, so a foreign patch flips affected
+     * per-record rules to unverifiable with no new rule key.
+     */
     complete: boolean;
+    /**
+     * Per-target provenance for every non-clean target (v1.4): 'foreign'
+     * (verified other-instance wrapper) or 'unknown' (an unbranded function a
+     * patch helper could positively flag as ambiguous). Clean ('owned') targets
+     * are omitted to keep the map small.
+     */
+    provenance: { [target: string]: 'foreign' | 'unknown' };
     /** Up to 20 labels naming what failed. */
     failures: string[];
 }

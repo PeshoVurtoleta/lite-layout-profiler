@@ -24,13 +24,40 @@
 // task into a single counted record (maxThrash), and ResizeObserver feedback
 // loops are flagged.
 //
+// v1.4 finishes the coverage lane: at instrument time, a target already
+// wrapped by ANOTHER lite-layout-profiler instance (a second profiler, a
+// leaked prior run, a double init) is detected with certainty via a branded-
+// wrapper check and reported as a distinct `foreign` outcome, so
+// summary().patched stops claiming complete coverage it does not have.
+// Per-target provenance is surfaced. The honest limit, measured not assumed: an
+// UNBRANDED pre-existing wrapper (a framework hook, a non-lite profiler) cannot
+// be told apart from a host's pristine JS implementation by inspection alone --
+// in happy-dom/jsdom the pristine impls are ordinary JS with no [native code]
+// marker -- so it is NOT claimed foreign, because a false `foreign` on every
+// pristine getter is exactly the noise a coverage check must avoid. We report
+// only what we can verify (our own brand), and `complete` accounts for it, so
+// the gate flips the affected rules to unverifiable with no new rule key.
+//
 // NOT zero-GC. This is a diagnostic tool that allocates per violation.
 // Ship behind a __DEV__ flag or strip from production builds.
 //
 // Copyright (c) 2026 Zahary Shinikchiev <shinikchiev@yahoo.com>
 // MIT License
 
-export const VERSION = '1.3.0';
+export const VERSION = '1.4.0';
+
+// The brand we stamp on every wrapper we install, so a later instrument-time
+// check can tell OUR wrapper from a foreign one with certainty. Symbol.for
+// (registered) so two library builds at different versions agree on the key,
+// and non-enumerable at install so it never serializes or shows in for..in.
+var WRAPPER_BRAND = Symbol.for('lite-layout-profiler.wrapper');
+
+// Shallow copy of the provenance map for a serialisable summary snapshot.
+function _copyProvenance(p) {
+    var out = {};
+    for (var k in p) { if (Object.prototype.hasOwnProperty.call(p, k)) out[k] = p[k]; }
+    return out;
+}
 
 // ---------------------------------------------------------------------------
 // Layout-triggering reads (the getters that force synchronous layout)
@@ -802,7 +829,8 @@ export function createLayoutProfiler(options) {
             summary: function () {
                 return {
                     total: 0, stored: 0, truncated: false, stacks: false,
-                    patched: { applied: 0, failed: 0, skipped: 0, complete: false,
+                    patched: { applied: 0, failed: 0, skipped: 0, foreign: 0,
+                        complete: false, provenance: {},
                         failures: ['no DOM in this environment'] },
                     byRead: {}, byWrite: {}, byTask: {}, taskCount: 0,
                     phases: { raf: 0, timer: 0, microtask: 0, roCallback: 0,
@@ -1085,6 +1113,40 @@ export function createLayoutProfiler(options) {
     var patchFailed = 0;
     var patchSkipped = 0;
     var patchFailures = [];
+    // v1.4 provenance. patchForeign counts targets that were VERIFIABLY already
+    // instrumented by someone else when we went to patch. provenance maps the
+    // label of every non-clean target to 'foreign' or 'unknown'. A clean
+    // ('owned') target is not listed, to keep the map small.
+    var patchForeign = 0;
+    var provenance = {};
+    // This instance's id, stamped into every wrapper's brand, so a second
+    // profiler instance can tell OUR wrappers from ITS wrappers with certainty.
+    var instanceId = 'llp-' + (Math.random().toString(36).slice(2, 10));
+
+    // Stamp our brand onto a wrapper we are about to install. Non-enumerable so
+    // it never serializes or shows in for..in. Carries this instance's id.
+    function brandWrapper(wrapper) {
+        try {
+            Object.defineProperty(wrapper, WRAPPER_BRAND, {
+                value: instanceId, enumerable: false, configurable: true, writable: false
+            });
+        } catch (e) { /* frozen fn: brand absent, treated as unbranded elsewhere */ }
+        return wrapper;
+    }
+
+    // Classify the value currently sitting in a slot we are about to patch.
+    // Returns 'owned-reentrant' (our own brand -- a leaked prior run or re-init),
+    // 'foreign' (branded by a DIFFERENT lite-layout-profiler instance -- a hard
+    // fact), or 'unbranded' (pristine host impl OR a foreign wrapper we cannot
+    // tell apart by inspection -- the caller decides how to report it).
+    function classifyExisting(current) {
+        if (typeof current !== 'function') return 'unbranded';
+        var brand;
+        try { brand = current[WRAPPER_BRAND]; } catch (e) { brand = undefined; }
+        if (brand === instanceId) return 'owned-reentrant';
+        if (typeof brand === 'string') return 'foreign';   // branded, not ours
+        return 'unbranded';
+    }
 
     // Three outcomes, and the middle one is why this is not a boolean.
     //
@@ -1094,6 +1156,9 @@ export function createLayoutProfiler(options) {
     //              the host does not have.
     //   false      present and refused -- frozen, non-configurable. A real
     //              hole: reflows can travel this path unseen.
+    //   'foreign'  present and VERIFIABLY already wrapped by another instrumenter
+    //              (v1.4). We patch on top and instrument correctly, but we do
+    //              not cleanly OWN the path, so coverage is not complete.
     //
     // Collapsing 'absent' into false would make every minimal host look torn,
     // which is how a coverage check turns into noise everyone learns to ignore.
@@ -1106,6 +1171,24 @@ export function createLayoutProfiler(options) {
             if (patchFailures.length < 20) patchFailures.push(label);
             return false;
         }
+        if (r === 'foreign') {
+            // Still applied (we wrapped on top and will detect reflows), but the
+            // path is not cleanly ours. Count both: applied so the instrument
+            // count is honest, foreign so completeness drops.
+            patchApplied++;
+            patchForeign++;
+            provenance[label] = 'foreign';
+            return true;
+        }
+        if (r === 'unknown') {
+            // Applied, but we could not verify whether a pre-existing unbranded
+            // function was the pristine host impl or a foreign wrapper. Honest
+            // middle state: not counted as foreign (unproven) and not silently
+            // clean (unverified). Surfaced as a caveat, does not lower complete.
+            patchApplied++;
+            provenance[label] = 'unknown';
+            return true;
+        }
         patchApplied++;
         return true;
     }
@@ -1116,10 +1199,12 @@ export function createLayoutProfiler(options) {
         if (typeof original !== 'function') return 'absent';
         var desc = Object.getOwnPropertyDescriptor(proto, name);
         if (desc && !desc.configurable && !desc.writable) return false;
-        var wrapper = function () {
+        // v1.4: classify what is already here before we replace it.
+        var existing = classifyExisting(original);
+        var wrapper = brandWrapper(function () {
             markDirty(source + '.' + name + '()');
             return original.apply(this, arguments);
-        };
+        });
         proto[name] = wrapper;
         // Restore only what is still ours. If another instrumenter patched on
         // top of us, its wrapper is what sits there now, and blindly writing
@@ -1127,6 +1212,11 @@ export function createLayoutProfiler(options) {
         patches.push(function () {
             if (proto[name] === wrapper) proto[name] = original;
         });
+        // 'owned-reentrant' means our OWN brand was already here (a leaked run);
+        // we treat that as clean-owned (we replaced it with a fresh wrapper).
+        // 'foreign' is a verified other-instance brand. 'unbranded' cannot be
+        // told apart from pristine, so it is reported neither foreign nor clean.
+        if (existing === 'foreign') return 'foreign';
         return true;
     }
 
@@ -1161,7 +1251,9 @@ export function createLayoutProfiler(options) {
         if (!desc.configurable) return false;
         var originalGet = desc.get;
         var originalSet = desc.set;
-        var wrapGet = measuredGet(originalGet, name);
+        // v1.4: classify the getter already installed here.
+        var existing = classifyExisting(originalGet);
+        var wrapGet = brandWrapper(measuredGet(originalGet, name));
         var newDesc = {
             get: wrapGet,
             enumerable: desc.enumerable,
@@ -1173,6 +1265,7 @@ export function createLayoutProfiler(options) {
             var cur = Object.getOwnPropertyDescriptor(proto, name);
             if (cur && cur.get === wrapGet) Object.defineProperty(proto, name, desc);
         });
+        if (existing === 'foreign') return 'foreign';
         return true;
     }
 
@@ -1737,7 +1830,20 @@ export function createLayoutProfiler(options) {
                 applied: patchApplied,
                 failed: patchFailed,
                 skipped: patchSkipped,
-                complete: patchFailed === 0,
+                // v1.4: targets verifiably already wrapped by another
+                // instrumenter. We still instrument them, but we do not cleanly
+                // own the path.
+                foreign: patchForeign,
+                // complete now means "every needed target is owned by us and
+                // nothing else." A foreign patch lowers it exactly like a failed
+                // one, so the gate's existing !complete -> unverifiable path
+                // covers it with no new rule.
+                complete: patchFailed === 0 && patchForeign === 0,
+                // Per-target provenance for every non-clean target: 'foreign'
+                // (verified other-instance wrapper) or 'unknown' (an unbranded
+                // function we cannot prove is pristine vs foreign). Clean
+                // ('owned') targets are omitted to keep this small.
+                provenance: _copyProvenance(provenance),
                 failures: patchFailures.slice()
             },
             // Set once the storage cap has dropped records. Any gate rule that

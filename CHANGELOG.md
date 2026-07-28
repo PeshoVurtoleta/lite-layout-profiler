@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.4.0
+
+The coverage lane's remaining half: foreign-patch provenance. v1.3's
+identity-checked restore already refused to clobber a wrapper layered on top of
+ours. This closes the other side -- detecting, at instrument time, that a target
+was already wrapped, so `summary().patched` stops claiming complete coverage it
+does not have.
+
+### Added
+
+- **`summary().patched.foreign`** -- count of targets verifiably already wrapped
+  by another lite-layout-profiler instance when we instrumented (a second
+  profiler, a leaked prior run, a double init).
+- **`summary().patched.provenance`** -- a per-target map of every non-clean
+  target to `'foreign'` (verified) or `'unknown'`. Clean targets are omitted.
+- **`patched.complete` now accounts for foreign patches.** It is true only when
+  every present target is owned by us and nothing else. Because the gate's
+  existing "incomplete coverage -> unverifiable" path reads `complete`, a run
+  instrumented on top of a foreign wrapper flips the affected per-record rules
+  to unverifiable automatically -- no new rule, no new key.
+
+### How detection works, and its honest limit
+
+Every wrapper we install is stamped with a non-enumerable brand
+(`Symbol.for('lite-layout-profiler.wrapper')`) carrying the installing
+instance's id. At instrument time, reading that brand off the value already in
+the slot is a certain signal: our own id (a re-entrant/leaked run, treated as
+clean-owned), a different id (**verified foreign**), or absent.
+
+The limit is deliberate and measured, not assumed: an **unbranded** pre-existing
+wrapper -- a framework hook, a non-lite profiler -- cannot be told apart from a
+host's pristine implementation by inspection. In happy-dom and jsdom the
+pristine impls are ordinary JS functions with no `[native code]` marker, so any
+"is this native?" heuristic would flag every pristine getter as foreign. That
+false positive on a clean host is exactly the noise a coverage check must avoid,
+so an unbranded wrapper is **never** asserted foreign. The lane reports only what
+it can verify.
+
+### Fixed / learned
+
+- **Stacked instances must tear down last-in-first-out.** Wrappers stack, so an
+  inner instance destroyed before an outer one cannot restore (the slot holds
+  the outer wrapper) and leaves an orphaned brand. This surfaced through the
+  identity-checked restore and is now covered by torture; the guidance is to
+  destroy profilers in reverse creation order.
+
+### Testing
+
+28 new scenarios: 11 standard (`test/07-provenance.test.mjs`) and 17 torture
+(`test/torture/l4-5-provenance.test.mjs`, axes A-D). Axis A is the false-positive
+guard asserted directly -- an unbranded wrapper and every pristine getter must
+never be called foreign. Full suite: 283 tests.
+
 ## 1.3.0
 
 The phase lane. v1.2 counts a forced reflow the same wherever it fires; v1.3

@@ -1,10 +1,12 @@
 # @zakkster/lite-layout-profiler -- Torture Test Plan
 
-**Status:** 131 torture scenarios shipped across v1.2.0 and v1.3.0 (slots
-L1.5, L2.5, L3.5, L99.9, L4.5). Axes A-I from v1.2; the phase lane reuses
-A-E with lane-specific meanings. v1.2's suite found 22 defects on first
-run; v1.3's L4.5 found 1 (`phasesObserved` reporting intent rather than
-whether rAF actually wrapped). All fixed before release.
+**Status:** 148 torture scenarios shipped across v1.2.0, v1.3.0, and v1.4.0
+(slots L1.5, L2.5, L3.5, L99.9, L4.5, L4.6). Axes A-I from v1.2; the phase
+lane (L4.5) reuses A-E and the provenance lane (L4.6) reuses A-D, with
+lane-specific meanings. v1.2's suite found 22 defects on first run; v1.3's
+L4.5 found 1 (`phasesObserved` reporting intent rather than whether rAF
+actually wrapped); v1.4's L4.6 surfaced the LIFO-teardown requirement for
+stacked instances. All fixed before release.
 
 Companion to the roadmap. The L-numbers slot into the lane they torture,
 so the adversarial code lands in the same session as the subsystem and
@@ -139,6 +141,37 @@ wrapped. On a host without rAF -- a worker, an old runtime -- that made
 budget it could not actually check. Fixed to report the real wrap result,
 so `maxInRaf` stays unverifiable exactly when rAF was not watched.
 
+### L4.6 -- Foreign-patch provenance (v1.4.0)
+
+`test/torture/l4-6-provenance.test.mjs` -- 17 scenarios. Axes A (4), B (4),
+C (4), D (5).
+
+The provenance lane makes a positive claim ("this target is foreign-wrapped")
+and a coverage claim ("complete"), so the danger is symmetric and the axes guard
+both directions. Axis A is the false-positive guard, and it is the load-bearing
+one: an unbranded foreign wrapper on a method, an unbranded foreign getter, a
+function branded under a *different* tool's symbol, and every pristine host impl
+must NEVER be asserted `foreign`. Claiming foreign on an unprovable target is the
+noise that trains users to ignore a coverage lane, and because happy-dom impls
+carry no `[native code]` marker, a naive nativeness heuristic would fire on all
+of them. Axis B proves the flip side: a wrapper carrying another instance's
+brand IS detected with certainty, drops `complete`, and does so even as the only
+foreign target among many clean ones. Axis C is teardown hygiene -- stacked
+instances unwind LIFO leaving the prototype as found, an inner-first destroy is a
+survivable no-op, and destroy is idempotent. Axis D is accounting
+self-consistency: `foreign` equals the count of foreign provenance entries,
+foreign targets are still counted `applied`, `complete` is true iff `failed` and
+`foreign` are both zero, and each summary's provenance is a fresh object.
+
+**What L4.6 surfaced:** stacked profiler instances must be destroyed
+last-in-first-out. Because wrappers stack and the restore is identity-checked, an
+inner instance destroyed before an outer one cannot restore (the slot holds the
+outer wrapper) and leaves an orphaned, still-branded wrapper. In happy-dom, whose
+prototype objects are shared across `Window` instances, that orphan leaked a
+brand into the next test until the harness both tore down LIFO and hard-reset to
+a captured-pristine snapshot. The library behaves correctly; the requirement is
+on the caller, and it is now documented.
+
 ---
 
 ## Defects found on first run
@@ -231,16 +264,10 @@ scenario is now pinned in both directions -- the honest report, and
   accounting; only a real engine proves the measurement.
 - **Cross-realm and iframe patching.** Arrives with the realm lane
   (v1.7); its torture slot is L7.5.
-- **Foreign-patch provenance.** The identity-checked restore lands here,
-  but reporting *which* targets carry a foreign patch is the coverage
-  lane's remaining half (v1.4), slot L4.5.
 - **Concurrency.** There are no threads in a document context, and the
   worker case has no DOM.
 
 ## Planned
 
-- **L4.5 -- coverage and provenance (v1.4).** Foreign-patch detection at
-  init, per-target provenance, and the `unverified` path when another
-  instrumenter owns a target we need.
 - **L7.5 -- cross-realm (v1.7).** Realm teardown ordering, an iframe
   navigated mid-run, a document adopted between realms.

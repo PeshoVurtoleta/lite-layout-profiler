@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { VERSION } from '../LayoutProfiler.js';
 
 test('VERSION is set', () => {
-    assert.equal(VERSION, '1.3.0');
+    assert.equal(VERSION, '1.4.0');
 });
 
 test('createLayoutProfiler returns a no-op profiler in non-browser env', async () => {

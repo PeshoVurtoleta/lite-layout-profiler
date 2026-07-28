@@ -156,9 +156,28 @@ the rule **fails as unverifiable** rather than passing on incomplete data, and
 An incomplete patch net invalidates every rule at once rather than one of
 them: a read that was never instrumented cannot appear in `total`, so even the
 exact count is a floor and not a number. `summary().patched` reports
-`{ applied, failed, skipped, complete, failures }`, where `skipped` means a
-target this host does not have (not a hole) and `failed` means a target that
-refused to be patched (a hole).
+`{ applied, failed, skipped, foreign, complete, provenance, failures }`, where
+`skipped` means a target this host does not have (not a hole), `failed` means a
+target that refused to be patched (a hole), and `foreign` (v1.4) means a target
+that was already wrapped by another instrumenter when we got there.
+
+**Foreign patches (v1.4).** If a second lite-layout-profiler instance -- a
+leaked prior run, a double init, two profilers in one page -- has already
+wrapped a target, patching on top of it works, but the reflows you record now
+travel through code you do not own. `patched.foreign` counts those targets,
+`patched.provenance` names them, and `patched.complete` goes false, so the gate
+flips the affected per-record rules to unverifiable exactly as it does for a
+failed patch. Detection is by a brand every wrapper carries, so it is certain
+for another lite-layout-profiler instance. The honest limit: an *unbranded*
+pre-existing wrapper (a framework hook, a non-lite tool) cannot be told apart
+from a host's pristine implementation by inspection -- in jsdom and happy-dom
+the pristine impls are ordinary JS with no `[native code]` marker -- so it is
+never falsely reported foreign. The lane reports only what it can verify.
+
+> **Tearing down stacked instances.** Wrappers stack, so destroy profilers in
+> reverse creation order (last created, first destroyed). An inner instance
+> destroyed first cannot restore -- the slot holds the outer wrapper -- and
+> leaves an orphaned wrapper behind.
 
 Zero counted reflows through a torn record set is not a clean run. If the
 storage cap dropped records, any rule that reasons about individual records
