@@ -49,6 +49,12 @@ export interface ViolationRecord {
     phase: ReflowPhase;
     /** True if inside a ResizeObserver callback that had already written (v1.3). */
     roFeedback: boolean;
+    /**
+     * True if this reflow fired inside a profiler.expected(fn) region -- a
+     * deliberate measurement the gate may excuse via allowExpected (v1.5). The
+     * record is kept either way; the flag only labels, the gate decides.
+     */
+    expected: boolean;
     timestamp: number;
 }
 
@@ -142,6 +148,8 @@ export interface ViolationSummary {
     phases: PhaseCounts;
     /** Whether requestAnimationFrame was actually wrapped -- what maxInRaf needs. */
     phasesObserved: boolean;
+    /** Recorded reflows that fired inside a profiler.expected(fn) region (v1.5). */
+    expected: number;
     /** Collapsed read-after-write loops (count > 1), worst first (v1.3). */
     thrash: ThrashGroup[];
     /** Worst collapsed count in any one task -- what maxThrash gates (v1.3). */
@@ -189,6 +197,14 @@ export interface LayoutProfiler {
     destroy(): void;
     /** Clear violations but keep profiler active. */
     reset(): void;
+    /**
+     * Run `fn` inside a deliberate-measurement scope (v1.5). Reflows that fire
+     * while control is inside it are stamped `expected: true`, so a gate with
+     * allowExpected can excuse them without silencing the same read elsewhere.
+     * Returns fn's return value. Nests; restores depth in a finally so a throw
+     * cannot strand it. Synchronous scope only -- an await inside fn escapes it.
+     */
+    expected<T>(fn: () => T): T;
     /** Serialisable snapshot for the gate. */
     summary(): ViolationSummary;
 }
@@ -227,6 +243,13 @@ export interface ReflowRules {
     allowWrites?: string[];
     /** Call-site substrings to exclude. Matches readSite or writeSite. */
     ignoreSites?: string[];
+    /**
+     * Exclude reflows that fired inside a profiler.expected(fn) scope (v1.5).
+     * Excludes by DYNAMIC SCOPE, not read name, so the same read is allowed
+     * where you marked it deliberate and still fails elsewhere. Unverifiable on
+     * a pre-1.5 summary (records without the `expected` flag). Default false.
+     */
+    allowExpected?: boolean;
 }
 
 /** One breached rule. Shape shared with lite-gc-profiler's checkNoGc. */
@@ -247,7 +270,7 @@ export interface GateReport {
     /** Reflows counted against the budget, after exclusions. */
     counted: number;
     excluded: number;
-    excludedBy: { reads: number; writes: number; sites: number };
+    excludedBy: { reads: number; writes: number; sites: number; expected: number };
     /** Cost of counted reflows. Null when the summary carried no records. */
     cost: {
         measured: number;

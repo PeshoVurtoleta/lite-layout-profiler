@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>lite-layout-profiler 1.4.0 -- forced-reflow detector</title>
+<title>lite-layout-profiler 1.5.0 -- forced-reflow detector</title>
 <style>
   :root {
     --bg:        #05100a; --bg: oklch(0.16 0.03 165);
@@ -78,7 +78,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>lite-layout-profiler <span class="v">1.4.0 -- forced-reflow detector</span></h1>
+    <h1>lite-layout-profiler <span class="v">1.5.0 -- forced-reflow detector</span></h1>
     <p class="sub">
       Click the buttons to trigger layout thrashing patterns. The profiler patches
       <code>offsetWidth</code>, <code>getBoundingClientRect</code>, etc. and flags
@@ -106,6 +106,9 @@
         </div>
         <div class="row-toolbar">
           <button id="btnRaf" class="btn-bad">Reflow inside rAF (frame killer)</button>
+        </div>
+        <div class="row-toolbar">
+          <button id="btnFlip" class="btn-sec">FLIP (expected scope)</button>
         </div>
         <div class="row-toolbar">
           <button id="btnReset" class="btn-sec">Reset violations</button>
@@ -164,6 +167,7 @@
           <label>maxPerTask <input type="number" id="rulePerTask" min="1" value="3"></label>
           <label>maxCostMs <input type="number" id="ruleCost" min="0" step="0.5" value="4"></label>
           <label>maxInRaf <input type="number" id="ruleInRaf" min="0" value="0"></label>
+          <label>allowExpected <input type="checkbox" id="ruleAllowExpected"></label>
         </fieldset>
         <div id="ruleList"></div>
       </div>
@@ -213,6 +217,7 @@ const $ruleReflows = document.getElementById('ruleReflows');
 const $rulePerTask = document.getElementById('rulePerTask');
 const $ruleCost = document.getElementById('ruleCost');
 const $ruleInRaf = document.getElementById('ruleInRaf');
+const $ruleAllowExpected = document.getElementById('ruleAllowExpected');
 
 // The profiler's own UI writes touch the DOM, which would dirty layout inside
 // the very task being measured. Two defences: attribution drops any frame from
@@ -298,7 +303,8 @@ function paint() {
         maxReflows: Number($ruleReflows.value) || 0,
         maxPerTask: Number($rulePerTask.value) || 1,
         maxCostMs: Number($ruleCost.value) || 0,
-        maxInRaf: Number($ruleInRaf.value) || 0
+        maxInRaf: Number($ruleInRaf.value) || 0,
+        allowExpected: $ruleAllowExpected.checked
     });
     if (report.ok) {
         $verdict.textContent = 'PASS';
@@ -340,6 +346,19 @@ function paint() {
 document.getElementById('btnSingle').addEventListener('click', function () {
     $target.style.width = (80 + Math.random() * 80) + 'px';
     void $target.offsetWidth;  // FORCED REFLOW
+});
+
+document.getElementById('btnFlip').addEventListener('click', function () {
+    // A deliberate FLIP-style measurement: read First, change layout, read Last.
+    // Wrapped in expected() so allowExpected can excuse these forced reflows
+    // WITHOUT silencing offsetWidth reads elsewhere. Toggle allowExpected in the
+    // budget to see the verdict flip.
+    profiler.expected(function () {
+        const first = $target.offsetWidth;                 // FORCED REFLOW (expected)
+        $target.style.width = (60 + Math.random() * 80) + 'px';
+        const last = $target.offsetWidth;                  // FORCED REFLOW (expected)
+        void (last - first);
+    });
 });
 
 document.getElementById('btnLoop').addEventListener('click', function () {
@@ -394,6 +413,7 @@ $ruleReflows.addEventListener('input', schedulePaint);
 $rulePerTask.addEventListener('input', schedulePaint);
 $ruleCost.addEventListener('input', schedulePaint);
 $ruleInRaf.addEventListener('input', schedulePaint);
+$ruleAllowExpected.addEventListener('change', schedulePaint);
 
 schedulePaint();
 </script>

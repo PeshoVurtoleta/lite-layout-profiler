@@ -107,9 +107,13 @@ test('unrelated key throws without a bogus suggestion', () => {
 
 test('future-lane rules name the lane instead of guessing a spelling', () => {
     assert.throws(
-        () => checkNoReflow(sum([]), { allowExpected: true }),
-        (e) => /requires the expected-scope lane \(v1\.5\+\)/.test(e.message)
+        () => checkNoReflow(sum([]), { maxInTimer: 0 }),
+        (e) => /not yet gated separately/.test(e.message)
     );
+});
+
+test('expected-scope rule shipped in 1.5 and is no longer future-lane', () => {
+    assert.doesNotThrow(() => checkNoReflow(sum([]), { allowExpected: true }));
 });
 
 test('phase-lane rules shipped in 1.3 and are no longer future-lane', () => {

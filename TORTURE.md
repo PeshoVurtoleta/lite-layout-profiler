@@ -1,12 +1,12 @@
 # @zakkster/lite-layout-profiler -- Torture Test Plan
 
-**Status:** 148 torture scenarios shipped across v1.2.0, v1.3.0, and v1.4.0
-(slots L1.5, L2.5, L3.5, L99.9, L4.5, L4.6). Axes A-I from v1.2; the phase
-lane (L4.5) reuses A-E and the provenance lane (L4.6) reuses A-D, with
-lane-specific meanings. v1.2's suite found 22 defects on first run; v1.3's
-L4.5 found 1 (`phasesObserved` reporting intent rather than whether rAF
-actually wrapped); v1.4's L4.6 surfaced the LIFO-teardown requirement for
-stacked instances. All fixed before release.
+**Status:** 166 torture scenarios shipped across v1.2.0, v1.3.0, v1.4.0, and
+v1.5.0 (slots L1.5, L2.5, L3.5, L99.9, L4.5, L4.6, L5.5). Axes A-I from v1.2;
+the phase lane (L4.5) reuses A-E, the provenance lane (L4.6) reuses A-D, and
+the expected-scope lane (L5.5) reuses A-D, with lane-specific meanings. v1.2's
+suite found 22 defects on first run; v1.3's L4.5 found 1 (`phasesObserved`
+reporting intent rather than whether rAF actually wrapped); v1.4's L4.6 surfaced
+the LIFO-teardown requirement for stacked instances. All fixed before release.
 
 Companion to the roadmap. The L-numbers slot into the lane they torture,
 so the adversarial code lands in the same session as the subsystem and
@@ -254,6 +254,38 @@ DOM *genuinely* dirties layout, and the next read genuinely stalls. The
 profiler was reporting the truth and my test was demanding a lie. That
 scenario is now pinned in both directions -- the honest report, and
 `ignorePatterns` as the remedy.
+
+---
+
+### L5.5 -- Expected-scope lane (v1.5.0)
+
+`test/torture/l5-5-expected.test.mjs` -- 18 scenarios. Axes A (5), B (4),
+C (5), D (4).
+
+The lane makes a scoped exclusion possible, so its danger is symmetric with the
+allowlist: a reflow must be excused ONLY where deliberate (a false exclusion
+hides a real bug) and the scope must be exactly the synchronous region marked (a
+leaked scope excuses reflows the developer never meant). Axis A pins the
+boundaries: a reflow immediately before or after `expected()` is not expected, a
+throw does not leak the scope to later reflows, a nested throw unwinds only one
+level, an `await` inside the callback escapes (the post-await reflow is a new
+task), and a pure `expected()` records nothing. Axis B proves the exclusion is
+scoped and not identity: the same read name is excused in-scope and fails
+out-of-scope, a reflow overlapping `allowExpected` and `allowReads` is excluded
+exactly once, and an out-of-scope reflow matching nothing is not excused. Axis C
+is fail-closed: `allowExpected` without the record flag is unverifiable, the
+label is inert without the rule, `allowExpected: false` equals omitting it, a
+non-boolean throws, and `expected(fn)` rejects non-functions. Axis D is
+accounting: deep nesting stays expected and unwinds cleanly, `summary().expected`
+equals the count of expected records, `counted + excluded === total`, and reset
+clears the count.
+
+The lesson this lane encodes: `allowReads` silences a read everywhere, which
+loses a bug to hide a feature; the expected scope is strictly finer because it
+excludes by where control was, not by what was read. The torture exists to prove
+that "where control was" is exactly the synchronous callback and not one
+instruction more -- which is why half of axis A is about throws and awaits, the
+two ways a scope could leak.
 
 ---
 

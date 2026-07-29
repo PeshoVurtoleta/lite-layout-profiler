@@ -38,13 +38,22 @@
 // only what we can verify (our own brand), and `complete` accounts for it, so
 // the gate flips the affected rules to unverifiable with no new rule key.
 //
+// v1.5 adds the expected-scope lane: profiler.expected(fn) marks a synchronous
+// region as a deliberate-measurement zone (a FLIP animation, a virtualised
+// list sizing pass), so reflows inside it are stamped `expected: true`. The
+// gate rule allowExpected then excludes them -- by DYNAMIC SCOPE, not by read
+// name -- so the same getBoundingClientRect is allowed where you meant it and
+// still fails everywhere else. The scope only labels; the gate decides, so
+// marking expected regions is inert until a gate opts in. Exclusions flow
+// through the same auditable excluded/excludedBy trail as the allowlist.
+//
 // NOT zero-GC. This is a diagnostic tool that allocates per violation.
 // Ship behind a __DEV__ flag or strip from production builds.
 //
 // Copyright (c) 2026 Zahary Shinikchiev <shinikchiev@yahoo.com>
 // MIT License
 
-export const VERSION = '1.4.0';
+export const VERSION = '1.5.0';
 
 // The brand we stamp on every wrapper we install, so a later instrument-time
 // check can tell OUR wrapper from a foreign one with certainty. Symbol.for
@@ -235,13 +244,12 @@ function probeResolution(budgetMs, clk) {
 const RULE_KEYS = [
     'maxReflows', 'maxPerTask', 'maxCostMs', 'maxTotalCostMs',
     'maxInRaf', 'maxThrash',
-    'allowReads', 'allowWrites', 'ignoreSites'
+    'allowReads', 'allowWrites', 'ignoreSites', 'allowExpected'
 ];
 
 // Rules that belong to lanes not yet shipped. Recognised so the error can say
 // what is actually wrong instead of offering a nonsense spelling suggestion.
 const FUTURE_RULE_KEYS = {
-    allowExpected: ['1.5', 'expected-scope lane'],
     maxInTimer: ['later', 'a per-scheduler rule that is not yet gated separately -- '
         + 'see summary().phases.timer for the count'],
     maxInMicrotask: ['later', 'a per-scheduler rule that is not yet gated separately -- '
@@ -397,6 +405,9 @@ function validateRules(rules) {
     if (rules.allowReads !== undefined) requireStringList('allowReads', rules.allowReads);
     if (rules.allowWrites !== undefined) requireStringList('allowWrites', rules.allowWrites);
     if (rules.ignoreSites !== undefined) requireStringList('ignoreSites', rules.ignoreSites);
+    if (rules.allowExpected !== undefined && typeof rules.allowExpected !== 'boolean') {
+        throw new TypeError('[lite-layout-profiler] `allowExpected` must be a boolean');
+    }
 
     // An allowlist entry that matches nothing in the closed read vocabulary is
     // a typo, and a typo here silently widens nothing while looking like it
@@ -471,6 +482,7 @@ export function checkNoReflow(summary, rules) {
     var allowReads = r.allowReads || [];
     var allowWrites = r.allowWrites || [];
     var ignoreSites = r.ignoreSites || [];
+    var allowExpected = r.allowExpected === true;
 
     var total = summary.total;
     var totalUsable = typeof total === 'number' && isFinite(total) &&
@@ -483,7 +495,7 @@ export function checkNoReflow(summary, rules) {
         total: total,
         counted: total,
         excluded: 0,
-        excludedBy: { reads: 0, writes: 0, sites: 0 },
+        excludedBy: { reads: 0, writes: 0, sites: 0, expected: 0 },
         cost: null,
         violations: []
     };
@@ -517,7 +529,8 @@ export function checkNoReflow(summary, rules) {
     var needsPhase = maxInRaf !== Infinity;
     var needsThrash = maxThrash !== Infinity;
     var hasAllowlist =
-        allowReads.length > 0 || allowWrites.length > 0 || ignoreSites.length > 0;
+        allowReads.length > 0 || allowWrites.length > 0 || ignoreSites.length > 0 ||
+        allowExpected;
     var needsRecords = hasAllowlist || maxPerTask !== Infinity || needsCost ||
         needsPhase || needsThrash;
     var records = Array.isArray(summary.records) ? summary.records : null;
@@ -561,6 +574,16 @@ export function checkNoReflow(summary, rules) {
             '`ignoreSites` needs call sites, but the run was recorded with ' +
             'captureStacks: false.');
     }
+    // allowExpected needs the `expected` flag on records. A pre-1.5 summary
+    // (records without the field) cannot honour an expected-scope exclusion --
+    // fail unverifiable rather than silently excusing nothing.
+    if (allowExpected && records !== null && records.length > 0 &&
+            typeof records[0].expected !== 'boolean') {
+        unverifiable(out, 'allowExpected', 'no expected flag',
+            '`allowExpected` needs the expected-scope flag on records, absent ' +
+            'from this summary (a pre-1.5 build?). The scope was never recorded, ' +
+            'so which reflows were deliberate cannot be known.');
+    }
 
     // -- Exclusion pass --
 
@@ -591,6 +614,13 @@ export function checkNoReflow(summary, rules) {
                         why = 'sites'; break;
                     }
                 }
+            }
+            // Expected-scope exclusion (v1.5). A reflow marked expected by a
+            // profiler.expected(fn) region is excused when allowExpected is set.
+            // Checked last so an identity-based exclusion (a specific read/site)
+            // is attributed to its own bucket first; a reflow is excluded once.
+            if (why === '' && allowExpected && rec.expected === true) {
+                why = 'expected';
             }
 
             if (why === '') kept.push(rec);
@@ -836,6 +866,7 @@ export function createLayoutProfiler(options) {
                     phases: { raf: 0, timer: 0, microtask: 0, roCallback: 0,
                         event: 0, unknown: 0, unobserved: 0 },
                     phasesObserved: false,
+                    expected: 0,
                     thrash: [], maxThrashCount: 0,
                     cost: {
                         resolutionMs: null, measured: 0, unmeasured: 0,
@@ -928,6 +959,15 @@ export function createLayoutProfiler(options) {
     // is what makes `maxPerTask` meaningful: ten reflows spread over ten
     // frames is a different illness from ten in one block.
     var taskEpoch = 0;
+
+    // Expected-scope lane state (v1.5). A depth counter incremented on entry to
+    // expected() and decremented in a finally on exit, so a throwing callback
+    // cannot strand it. Nests: a FLIP inside a FLIP is expected at depth 2. A
+    // reflow is expected iff expectedDepth > 0 when recordRead runs. Purely
+    // synchronous -- an await inside expected() escapes the scope, which is
+    // correct: a reflow after an await is a new task, not the marked
+    // measurement.
+    var expectedDepth = 0;
 
     // Phase lane state (v1.3). currentPhase is the top of a small stack the
     // scheduler wrappers push/pop. 'unobserved' is the value when phase
@@ -1029,6 +1069,11 @@ export function createLayoutProfiler(options) {
             // Phase lane (v1.3). The scheduler this read fired under. See the
             // pushPhase/popPhase wrappers; 'unobserved' when phases:false.
             phase: currentPhase,
+            // Expected-scope lane (v1.5). True when this reflow fired inside a
+            // profiler.expected(fn) region -- a deliberate measurement the gate
+            // may excuse via allowExpected. The record is kept either way; the
+            // flag only labels, the gate decides.
+            expected: expectedDepth > 0,
             // True when this reflow happened inside a ResizeObserver callback
             // whose body had already written layout -- the shape of an RO
             // feedback loop, where the write dirties layout and forces the
@@ -1684,6 +1729,26 @@ export function createLayoutProfiler(options) {
         violationCount = 0;
     }
 
+    // Expected-scope lane (v1.5). Run `fn` inside a marked deliberate-measurement
+    // region: reflows that fire while control is inside it are stamped
+    // `expected: true`, so a gate with allowExpected can excuse them WITHOUT
+    // silencing the same read elsewhere. Returns fn's return value. Nests, and
+    // restores depth in a finally so a throw cannot strand it. Synchronous scope
+    // only -- an await inside fn escapes it (a reflow after an await is a new
+    // task, not the marked measurement). A no-op wrapper when inactive: fn still
+    // runs, its reflows simply are not labelled expected.
+    function expected(fn) {
+        if (typeof fn !== 'function') {
+            throw new TypeError('[lite-layout-profiler] expected(fn): fn must be a function');
+        }
+        expectedDepth++;
+        try {
+            return fn();
+        } finally {
+            expectedDepth--;
+        }
+    }
+
     // The summary is deliberately self-sufficient: it carries a lean snapshot
     // of the records rather than a live reference to the internal array, so
     // it can be JSON-serialised, shipped out of the browser, and gated in CI
@@ -1701,6 +1766,7 @@ export function createLayoutProfiler(options) {
         var totalMs = 0;
         var maxMs = 0;
         var unmeasured = 0;
+        var expectedCount = 0;   // v1.5: recorded reflows that fired in an expected scope
 
         // Phase counts over the whole run (v1.3).
         var phaseCounts = {
@@ -1725,6 +1791,7 @@ export function createLayoutProfiler(options) {
             byWrite[v.write] = (byWrite[v.write] || 0) + 1;
             byTask[v.taskId] = (byTask[v.taskId] || 0) + 1;
             phaseCounts[phaseKey(v.phase)]++;
+            if (v.expected) expectedCount++;
 
             if (isMeasuredCost(v.costMs)) {
                 costs.push(v.costMs);
@@ -1748,6 +1815,10 @@ export function createLayoutProfiler(options) {
                 writeSite: v.writeSite,
                 phase: v.phase,
                 roFeedback: v.roFeedback,
+                // v1.5: whether this reflow fired inside an expected() scope, so
+                // a gate with allowExpected can excuse it. Kept in the snapshot
+                // because the gate consumes the serialised summary, not the ring.
+                expected: v.expected,
                 costMs: v.costMs,
                 belowGranularity: v.belowGranularity,
                 timestamp: v.timestamp
@@ -1861,6 +1932,10 @@ export function createLayoutProfiler(options) {
             // "no reflow in rAF" if rAF was never watched.
             phases: phaseCounts,
             phasesObserved: rafObserved,
+            // Expected-scope lane (v1.5): recorded reflows that fired inside a
+            // profiler.expected(fn) region. Visibility for "12 reflows, 9
+            // expected, 3 not" without re-scanning records.
+            expected: expectedCount,
             // Collapsed read-after-write loops (count > 1), worst first, plus
             // the worst single count for maxThrash to gate.
             thrash: thrash,
@@ -1899,6 +1974,7 @@ export function createLayoutProfiler(options) {
         get active() { return active; },
         destroy: destroy,
         reset: reset,
+        expected: expected,
         summary: summary
     };
 }

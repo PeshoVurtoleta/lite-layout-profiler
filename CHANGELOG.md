@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.5.0
+
+The expected-scope lane, delivering on the `allowExpected` key reserved since
+v1.1. Not every forced reflow is a bug: a FLIP animation reads First and Last
+positions on purpose, a virtualised list reads row heights to size itself, a
+tooltip reads its trigger's rect to place itself. Those are deliberate and
+necessary. Until now the only way to quiet them was `allowReads`, which silences
+a read *everywhere* -- losing the accidental read three files over to hide the
+deliberate one here.
+
+### Added
+
+- **`profiler.expected(fn)`** runs `fn` inside a marked deliberate-measurement
+  scope. Reflows that fire while control is inside it are stamped
+  `expected: true`. Returns fn's return value; nests; restores depth in a
+  `finally` so a throw cannot strand it.
+- **`allowExpected: true`** (gate rule) excludes expected reflows -- by DYNAMIC
+  SCOPE, not read name. The same `getBoundingClientRect` is excused where you
+  wrapped it and still fails everywhere else. This is the granularity
+  `allowReads` cannot express.
+- **`summary().expected`** -- count of recorded reflows that fired in an expected
+  scope, and **`record.expected`** on every record, so a run can show "12
+  reflows, 9 expected, 3 not" and the gate can act on the label.
+
+### Scope is synchronous, and only labels
+
+`expected()` marks a *synchronous* region. An `await` inside the callback
+escapes the scope -- a reflow after an await is a new task, not the deliberate
+measurement -- which matches how task epochs and the phase stack already work.
+The scope only labels the records; it never suppresses them, so
+`summary().records` still shows every expected reflow with its flag for audit.
+The label is inert until a gate opts in with `allowExpected`, so marking
+`expected()` regions is safe to leave in a dev build even when a given gate does
+not pass the rule.
+
+### Fail-closed
+
+`allowExpected` on a pre-1.5 summary (records without the `expected` flag) is
+**unverifiable**, not a silent pass -- you cannot honour a scope exclusion
+against data that never recorded the scope. Exclusions flow through the same
+auditable `excluded`/`excludedBy` trail as the allowlist (`excludedBy.expected`),
+and a reflow that overlaps `allowExpected` and an identity rule is excluded once,
+attributed to the identity rule.
+
+### Testing
+
+31 new scenarios: 13 standard (`test/08-expected.test.mjs`) and 18 torture
+(`test/torture/l5-5-expected.test.mjs`, axes A-D). Axis A pins the scope
+boundaries -- no leak across a throw or an await, exactly the marked region.
+Full suite: 315 tests.
+
 ## 1.4.0
 
 The coverage lane's remaining half: foreign-patch provenance. v1.3's

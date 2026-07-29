@@ -1,7 +1,7 @@
 # @zakkster/lite-layout-profiler
 
 Dev-mode forced-reflow detector and budget gate for DOM-binding code.
-Version 1.4.0. Zero dependencies. MIT (c) Zahary Shinikchiev.
+Version 1.5.0. Zero dependencies. MIT (c) Zahary Shinikchiev.
 
 ## What it does
 
@@ -53,7 +53,7 @@ checkNoReflow(summary, rules?) -- returns a GateReport, never throws on breach.
 assertNoReflow(summary, rules?) -- throws ReflowBudgetError on breach.
 ReflowBudgetError -- carries .report and .violations.
 READ_NAMES -- closed vocabulary of read names this build can emit.
-VERSION -- '1.4.0'.
+VERSION -- '1.5.0'.
 
 ## Violation shape
 
@@ -80,6 +80,7 @@ unmeasurable. belowGranularity distinguishes "too fast to time" from
   patched: { applied, failed, skipped, foreign, complete, provenance, failures },
   phases: { raf, timer, microtask, roCallback, event, unknown, unobserved },
   phasesObserved,        -- was requestAnimationFrame actually wrapped
+  expected,              -- recorded reflows inside a profiler.expected() scope (v1.5)
   thrash: [ { read, write, taskId, phase, count, costMs } ... ],  -- count>1
   maxThrashCount,        -- worst collapsed count, what maxThrash gates
   cost: { resolutionMs, measured, unmeasured, totalMs, maxMs, avgMs, p99Ms },
@@ -113,6 +114,8 @@ maxThrash       -- worst collapsed read-after-write count in any one task.
 allowReads      -- exact read names to exclude, validated against READ_NAMES.
 allowWrites     -- write-source prefixes to exclude.
 ignoreSites     -- call-site substrings to exclude, matches readSite or writeSite.
+allowExpected   -- boolean (v1.5). Exclude reflows stamped by profiler.expected(fn),
+                   by DYNAMIC SCOPE not read name. Unverifiable on a pre-1.5 summary.
 
 Report: { ok, verified, total, counted, excluded, excludedBy,
           cost: { measured, unmeasured, totalMs, maxMs } | null,
@@ -132,6 +135,7 @@ goes false.
   maxPerTask                  needs complete records    fails if truncated
   allowReads / allowWrites    needs complete records    fails if truncated
   ignoreSites                 needs records + sites     also fails if captureStacks: false
+  allowExpected               needs record.expected     fails if summary is pre-1.5
   maxCostMs / maxTotalCostMs  needs measured costs      fails if any counted reflow is unmeasured
   maxInRaf                    needs phasesObserved      fails if phases were off or rAF absent
   maxThrash                   needs complete records    fails if truncated
@@ -141,9 +145,8 @@ maxReflows alone survives truncation, because total is kept independently
 of the storage ring: a capped run is gateable on volume, not on shape.
 
 Unknown rule keys throw TypeError with a did-you-mean hint rather than
-being ignored. Rules from unshipped lanes (maxInRaf, maxThrash,
-allowExpected) name their lane and version instead of guessing a
-spelling. allowReads entries are validated against READ_NAMES.
+being ignored. Rules from unshipped lanes (maxInTimer, maxInMicrotask) name their lane
+and status instead of guessing a spelling. allowReads entries are validated against READ_NAMES.
 
 ## Null is not zero
 
@@ -170,6 +173,17 @@ ignorePatterns (profiler option) drops a reflow at capture time -- never
 recorded, never in total.
 ignoreSites (gate rule) excludes an already-recorded reflow at gate time
 -- still in total, subtraction visible in excluded / excludedBy.
+
+Expected-scope lane (v1.5): profiler.expected(fn) marks a SYNCHRONOUS
+region as a deliberate-measurement zone (FLIP reads, virtualised-list
+sizing). Reflows inside it are stamped record.expected=true; allowExpected
+excuses them by DYNAMIC SCOPE, so the SAME read is allowed where you meant
+it and still fails elsewhere -- strictly finer than allowReads, which
+silences a read everywhere. Synchronous only: an await inside the callback
+escapes the scope (a reflow after await is a new task). The label is inert
+until a gate opts in; the scope labels records, never suppresses them, so
+summary().records keeps every expected reflow for audit. excludedBy.expected
+counts them; overlap with an identity rule is excluded once.
 
 Prefer ignoreSites so the number stays honest.
 

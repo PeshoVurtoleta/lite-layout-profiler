@@ -924,6 +924,61 @@ a stale original over the newer patch and deleting it.
 - If another tool patches the same getter and does **not** do this check,
   its teardown will delete ours. Nothing on this side can prevent that.
 
+## Recipe 18: Pro: allowing a deliberate measurement without hiding bugs
+
+**Goal.** A FLIP animation, a virtualised list, or a tooltip reads layout on
+purpose. Excuse those reflows in the gate WITHOUT silencing the same read at an
+accidental call site.
+
+**Primitive.** `profiler.expected(fn)` + the `allowExpected` gate rule.
+
+**Why not `allowReads`.** `allowReads: ['getBoundingClientRect']` excludes that
+read *everywhere*. Your FLIP code reads `getBoundingClientRect` deliberately, but
+so does the accidental read-in-a-loop you actually want to catch. Excluding by
+name throws the bug out with the feature.
+
+**Code.**
+
+```js
+// The deliberate measurement, wrapped:
+profiler.expected(() => {
+  const first = el.getBoundingClientRect();
+  el.classList.add('expanded');          // layout change
+  const last = el.getBoundingClientRect();
+  playFlip(first, last);
+});
+
+// Elsewhere, an accidental read in a loop -- NOT wrapped:
+for (const row of rows) { row.style.height = h; void row.offsetHeight; }
+```
+
+```js
+// Gate: excuse the deliberate reads, still catch the loop.
+const rep = checkNoReflow(profiler.summary(), {
+  maxReflows: 0,
+  allowExpected: true
+});
+// rep.excludedBy.expected -> the FLIP reads
+// rep.counted             -> the loop still counts; rep.ok is false
+```
+
+**Reading the verdict.** `allowExpected` excludes by dynamic scope, so the same
+`getBoundingClientRect` is excused inside `expected()` and fails outside it.
+`rep.excludedBy.expected` shows how many the scope excused; `rep.counted` is what
+remains and what `maxReflows` gates.
+
+**Gotchas.**
+
+- **Synchronous only.** An `await` inside `expected()` escapes the scope -- the
+  post-await reflow is a new task, not the marked measurement. Keep the
+  before/change/after reads in one synchronous block, which is how FLIP works
+  anyway.
+- **The label is inert without the rule.** Leaving `expected()` in a dev build
+  is safe: absent `allowExpected`, those reflows count like any other. The scope
+  labels; the gate decides.
+- **Pre-1.5 summaries.** `allowExpected` against a summary recorded by an older
+  build (no `expected` flag on records) is unverifiable, not a silent pass.
+
 ## Recipe 15: Pro: one vocabulary with lite-gc-profiler
 
 **Goal.** One CI reporter for both profilers.

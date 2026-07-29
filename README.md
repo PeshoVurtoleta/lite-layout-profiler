@@ -207,6 +207,48 @@ this build instruments, derived from the same lists the patcher uses so it
 cannot drift. `allowWrites` is a prefix match -- `'CSSStyleDeclaration.'` allows
 every style write. `ignoreSites` is a substring match against either call site.
 
+### Expected scopes: `expected()` and `allowExpected`
+
+`allowReads` and `ignoreSites` exclude by identity -- a read name, a call site.
+That is too blunt for a deliberate measurement: `allowReads: ['getBoundingClientRect']`
+silences the FLIP animation's intentional read AND the accidental read-in-a-loop
+three files over. You lose the bug to hide the feature.
+
+The expected-scope lane (v1.5) excludes by **dynamic scope** instead. Wrap the
+deliberate measurement in `profiler.expected(fn)`:
+
+```js
+profiler.expected(() => {
+  const first = el.getBoundingClientRect();   // deliberate FLIP read -- excused
+  applyLayoutChange();
+  const last = el.getBoundingClientRect();     // excused
+  animate(first, last);
+});
+
+el.offsetWidth;   // OUTSIDE the scope -- still a violation
+```
+
+Reflows inside the callback are stamped `expected: true`. The gate rule
+`allowExpected: true` then excuses them -- and *only* them. The same read name
+outside the scope still fails. That is the granularity `allowReads` cannot
+express: allow the reflow where you meant it, keep failing it everywhere else.
+
+Three properties are worth knowing:
+
+- **The scope is synchronous.** An `await` inside the callback escapes it -- a
+  reflow after the await is a new task, not the marked measurement -- matching
+  how task epochs and the phase stack already behave. `expected()` nests, and
+  restores its depth in a `finally` so a throw cannot strand it.
+- **The label is inert until a gate opts in.** Without `allowExpected`, expected
+  reflows count like any other, so marking `expected()` regions is safe to leave
+  in a dev build regardless of which gates run. `summary().expected` reports the
+  count either way, and `summary().records` keeps every expected reflow with its
+  flag for audit -- the scope labels, it never suppresses.
+- **It is fail-closed.** `allowExpected` on a pre-1.5 summary (records with no
+  `expected` flag) is unverifiable, not a silent pass. Exclusions show up in
+  `excludedBy.expected`, and a reflow that overlaps `allowExpected` and an
+  identity rule is excluded once.
+
 ### `ignorePatterns` vs `ignoreSites`
 
 Both filter by call site; they act at different times and the difference
