@@ -1,0 +1,26 @@
+{
+  "schema": "lite-layout-report/1",
+  "version": "1.6.0",
+  "generatedAt": "2026-07-30T01:00:18.210Z",
+  "verdict": "pass",
+  "report": {
+    "ok": true,
+    "verified": true,
+    "total": 0,
+    "counted": 0,
+    "excluded": 0,
+    "excludedBy": {
+      "reads": 0,
+      "writes": 0,
+      "sites": 0,
+      "expected": 0
+    },
+    "cost": {
+      "measured": 0,
+      "unmeasured": 0,
+      "totalMs": null,
+      "maxMs": null
+    },
+    "violations": []
+  }
+}

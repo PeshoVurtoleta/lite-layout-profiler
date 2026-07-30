@@ -274,6 +274,86 @@ buffer entirely.
 > generic word or your own file's path. (Node/jsdom stacks often omit URLs,
 > which is how this mistake hides in a test suite and only surfaces in Chrome.)
 
+## Reporting
+
+`checkNoReflow` returns a report; four formatters turn it into output. Each
+takes the raw report and derives the verdict internally, so they work on a fresh
+in-browser report and on one round-tripped through `layout.json` alike.
+
+```js
+import {
+  checkNoReflow, formatConsole, formatJson, formatMarkdown, formatGithubAnnotations
+} from '@zakkster/lite-layout-profiler';
+
+const report = checkNoReflow(profiler.summary(), { maxReflows: 0 });
+
+console.log(formatConsole(report));         // [PASS]/[FAIL]/[INCONCLUSIVE] + reasons
+const json = formatJson(report);            // the layout.json envelope (below)
+const md = formatMarkdown(report);          // a PR-comment table
+const gh = formatGithubAnnotations(report); // ::error / ::warning workflow commands
+```
+
+The verdict is derived from the report's `ok` and `verified` booleans, which
+stay the source of truth:
+
+| ok | verified | verdict |
+| --- | --- | --- |
+| any | `false` (or absent) | `inconclusive` |
+| `false` | `true` | `fail` |
+| `true` | `true` | `pass` |
+
+`verified` must be exactly `true` for a definitive verdict -- a run that could
+not verify a rule (incomplete coverage, a foreign patch) is never a pass.
+
+`formatJson` produces the `lite-layout-report/1` envelope:
+
+```json
+{
+  "schema": "lite-layout-report/1",
+  "version": "1.6.0",
+  "generatedAt": "2026-07-30T00:00:00.000Z",
+  "verdict": "fail",
+  "report": { "ok": false, "verified": true, "counted": 5, "violations": [ ... ] }
+}
+```
+
+## CLI: lite-layout-gate
+
+Layout cannot be forced headless in Node, so the CLI does not run the profiler.
+Run the profiler in the browser, gate with `checkNoReflow`, write the envelope
+to a file, and gate that file in CI:
+
+```js
+// in the page, after exercising the UI:
+import { checkNoReflow, formatJson } from '@zakkster/lite-layout-profiler';
+const json = formatJson(checkNoReflow(profiler.summary(), { maxReflows: 0 }));
+// download/emit `json` as layout.json (e.g. Playwright saves it from page context)
+```
+
+```sh
+# in CI, against the captured file:
+npx lite-layout-gate layout.json
+npx lite-layout-gate layout.json --format github    # PR annotations
+npx lite-layout-gate layout.json --format json --out gated.json
+```
+
+Options: `--format console|json|markdown|github` (default console), `--out path`
+(also write the JSON envelope), `--allow-inconclusive` (accepted for parity with
+`lite-gc-gate`; inconclusive is exit 2 either way).
+
+Exit codes, identical to `lite-gc-gate`:
+
+| code | meaning |
+| --- | --- |
+| 0 | pass |
+| 1 | fail |
+| 2 | inconclusive |
+| 3 | infrastructure error (file missing, bad JSON, not a report) |
+
+Feeding the CLI a summary rather than a report exits 3 with a redirect: a
+summary has no verdict until rules are applied, and applying rules is the
+browser's job. There is no `run` subcommand.
+
 ## Cost
 
 A count tells you a reflow happened. The cost tells you whether it mattered.

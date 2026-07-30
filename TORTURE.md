@@ -1,7 +1,8 @@
 # @zakkster/lite-layout-profiler -- Torture Test Plan
 
-**Status:** 166 torture scenarios shipped across v1.2.0, v1.3.0, v1.4.0, and
-v1.5.0 (slots L1.5, L2.5, L3.5, L99.9, L4.5, L4.6, L5.5). Axes A-I from v1.2;
+**Status:** 178 torture scenarios shipped across v1.2.0, v1.3.0, v1.4.0,
+v1.5.0, and v1.6.0 (slots L1.5, L2.5, L3.5, L99.9, L4.5, L4.6, L5.5, L6.5).
+Axes A-I from v1.2, plus J-L added in v1.6 for the reporting layer and CLI;
 the phase lane (L4.5) reuses A-E, the provenance lane (L4.6) reuses A-D, and
 the expected-scope lane (L5.5) reuses A-D, with lane-specific meanings. v1.2's
 suite found 22 defects on first run; v1.3's L4.5 found 1 (`phasesObserved`
@@ -69,6 +70,19 @@ one.
 offending task. Anything the callback does -- read, write, throw,
 destroy, reset -- happens in the middle of the profiler's own
 bookkeeping.
+
+**Axis J -- a formatter never lies (v1.6).** No report, however malformed,
+may crash a formatter or upgrade a non-pass to a PASS. A missing `verified`
+flag, a non-array `violations`, a null report -- each must render as
+inconclusive-or-worse, never green.
+
+**Axis K -- the envelope is faithful (v1.6).** What `formatJson` wraps comes
+back out: the raw report byte-for-byte in structure, the verdict re-derivable
+from the round-tripped report, across every verdict.
+
+**Axis L -- the CLI's exit code matches its printed verdict (v1.6).** 0/1/2
+track pass/fail/inconclusive exactly, and an unreadable input is always exit 3,
+never a silent 0.
 
 ---
 
@@ -286,6 +300,32 @@ excludes by where control was, not by what was read. The torture exists to prove
 that "where control was" is exactly the synchronous callback and not one
 instruction more -- which is why half of axis A is about throws and awaits, the
 two ways a scope could leak.
+
+---
+
+### L6.5 -- Reporting layer and CLI (v1.6.0)
+
+`test/torture/l6-5-report-cli.test.mjs` -- 12 scenarios. Axes J (5), K (3),
+L (4).
+
+The formatters and the gate CLI sit between a report and a human or a CI exit
+code, so their failure mode is a lie: a malformed report that renders as a clean
+PASS, an envelope that drops the verdict on round-trip, a CLI that exits 0 on
+something it could not read. Axis J attacks the formatters with reports missing
+every field, null/undefined, non-array violations, and a broken `verified` flag
+(each of undefined/null/0/''/'true'/NaN must not become a pass); it also asserts
+malformed violation entries render without throwing. Axis K round-trips every
+verdict through `formatJson` and asserts the raw report survives deep-equal and
+the verdict re-derives. Axis L spawns the real CLI and asserts the printed
+verdict and exit code never disagree, that garbage/missing/array/scalar inputs
+are all exit 3, that a report with absent booleans is not silently accepted, and
+that `--format github` on a fail still exits 1.
+
+This slot caught a fail-closed gap during development: `_verdictOf` originally
+treated only `verified === false` as inconclusive, so a report with `verified`
+absent fell through to a PASS. Axis J's broken-flag scenario failed, and the fix
+went to the code -- `verified` must now be exactly `true` for a definitive
+verdict -- not the test.
 
 ---
 

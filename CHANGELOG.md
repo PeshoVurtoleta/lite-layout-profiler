@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.6.0
+
+The reporting layer and a CLI gate, delivering "CLI gate + layout.json +
+prepublish coverage" from the roadmap -- the analogue of lite-gc-gate.
+
+The decisive difference from gc-profiler shapes the whole feature: gc-profiler
+runs headless in Node, and this profiler cannot. It patches real DOM getters to
+catch reflows a real layout engine forces; there is no layout in Node, and a
+headless-browser dependency would violate the zero-dep law (and lie, since a
+stub DOM forces no layout). So the CLI does NOT run the profiler. The browser
+runs it, calls `checkNoReflow`, serialises the result to a `layout.json`, and
+the CLI gates that file in CI. Measurement where layout is real; the gate where
+CI lives.
+
+### Added
+
+- **Formatters** on `LayoutProfiler.js` (the profiler had none):
+  - `formatConsole(report)` -- a verdict line and per-violation reasons, ASCII
+    PASS/FAIL/INCONCLUSIVE tags.
+  - `formatJson(report)` -- the `lite-layout-report/1` envelope: schema, version,
+    generatedAt, the derived verdict, and the raw report verbatim.
+  - `formatMarkdown(report)` -- a PR-comment-ready table.
+  - `formatGithubAnnotations(report)` -- `::error` per violation on fail, a
+    single `::warning` on inconclusive, nothing on pass.
+- **`_verdictOf(report)`** -- derives pass/fail/inconclusive from the report's
+  `ok`/`verified` booleans, which stay the source of truth. `verified` must be
+  exactly `true` for a definitive verdict; anything else is inconclusive
+  (fail-closed).
+- **`lite-layout-gate` CLI** (`bin/LiteLayoutGate.mjs`, shipped in `files[]`):
+  reads a serialised report (envelope or bare), applies the exit-code contract
+  (0 pass / 1 fail / 2 inconclusive / 3 infrastructure error), and formats.
+  Feeding it a summary instead of a report exits 3 with a redirect to gate in
+  the browser first. Zero new deps; `node:fs`/`node:path` only.
+- **Prepublish coverage**: `prepublishOnly` runs the suite and gates two
+  checked-in fixtures (`test/fixtures/clean.layout.json`,
+  `failing.layout.json`), both produced by the real profiler, so a regression in
+  the exit contract fails the publish.
+
+### Notes
+
+- No `run` subcommand, ever -- see above.
+- No baseline/ratchet lane: reflow counts are deterministic given a fixed
+  workload, so a baseline buys far less than it does for gc perf numbers.
+  Deferred unless asked.
+- 40 new tests (14 reporting, 14 CLI, 12 torture L6.5 across axes G/H/I). The
+  torture caught and fixed a fail-closed gap: a report with a missing `verified`
+  flag now derives inconclusive, never a silent pass.
+
 ## 1.5.0
 
 The expected-scope lane, delivering on the `allowExpected` key reserved since

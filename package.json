@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-layout-profiler",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
   "description": "Dev-mode forced-reflow detector. Patches layout-triggering getters, tracks DOM writes, flags read-after-write within the same task, attributes to call site. The #1 silent frame killer, made visible.",
   "type": "module",
@@ -24,10 +24,12 @@
     "COOKBOOK.md",
     "TORTURE.md",
     "llms.txt",
-    "LICENSE"
+    "LICENSE",
+    "bin/LiteLayoutGate.mjs"
   ],
   "scripts": {
-    "test": "node --test 'test/*.test.mjs' 'test/torture/*.test.mjs'"
+    "test": "node --test 'test/*.test.mjs' 'test/torture/*.test.mjs'",
+    "prepublishOnly": "npm test && node bin/LiteLayoutGate.mjs test/fixtures/clean.layout.json && ! node bin/LiteLayoutGate.mjs test/fixtures/failing.layout.json"
   },
   "devDependencies": {
     "happy-dom": "^15.11.7"
@@ -66,5 +68,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "bin": {
+    "lite-layout-gate": "./bin/LiteLayoutGate.mjs"
   }
 }

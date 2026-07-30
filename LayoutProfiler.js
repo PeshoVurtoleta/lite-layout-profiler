@@ -47,13 +47,23 @@
 // marking expected regions is inert until a gate opts in. Exclusions flow
 // through the same auditable excluded/excludedBy trail as the allowlist.
 //
+// v1.6 adds the reporting layer and a CLI gate. Formatters (formatConsole,
+// formatJson, formatMarkdown, formatGithubAnnotations) turn a checkNoReflow
+// report into console output, a versioned JSON envelope (lite-layout-report/1),
+// a PR-ready markdown table, or GitHub workflow annotations. The CLI
+// (lite-layout-gate) reads a serialised report -- a layout.json the BROWSER
+// produced, since layout cannot be forced headless in Node -- and exits 0/1/2/3
+// for pass/fail/inconclusive/error, the same contract as lite-gc-gate. A verdict
+// enum is derived from the report's ok/verified booleans; those stay the source
+// of truth.
+//
 // NOT zero-GC. This is a diagnostic tool that allocates per violation.
 // Ship behind a __DEV__ flag or strip from production builds.
 //
 // Copyright (c) 2026 Zahary Shinikchiev <shinikchiev@yahoo.com>
 // MIT License
 
-export const VERSION = '1.5.0';
+export const VERSION = '1.6.0';
 
 // The brand we stamp on every wrapper we install, so a later instrument-time
 // check can tell OUR wrapper from a foreign one with certainty. Symbol.for
@@ -806,6 +816,144 @@ export function assertNoReflow(summary, rules) {
     var report = checkNoReflow(summary, rules);
     if (!report.ok) throw new ReflowBudgetError(report);
     return report;
+}
+
+// ---------------------------------------------------------------------------
+// Reporting layer (v1.6) -- formatters + the layout.json envelope.
+//
+// checkNoReflow speaks in two booleans (ok, verified); the formatters and the
+// CLI exit contract want one enum. _verdictOf projects the booleans to a
+// verdict WITHOUT changing the report -- ok/verified stay the source of truth.
+// ---------------------------------------------------------------------------
+
+const REPORT_SCHEMA = 'lite-layout-report/1';
+
+/**
+ * Derive the pass/fail/inconclusive verdict from a checkNoReflow report.
+ * Pure projection of ok/verified: an unverifiable report is inconclusive
+ * regardless of ok, a verified breach is fail, a verified clean run is pass.
+ * @param {GateReport} report
+ * @returns {'pass'|'fail'|'inconclusive'}
+ */
+export function _verdictOf(report) {
+    if (!report || typeof report !== 'object') return 'inconclusive';
+    // verified must be EXACTLY true to yield a definitive verdict. A missing or
+    // non-boolean verified (a hand-crafted or corrupt report) is inconclusive,
+    // not a pass -- fail-closed, the same principle as "null is not zero". Real
+    // checkNoReflow reports always set verified to a boolean, so this only ever
+    // catches malformed input.
+    if (report.verified !== true) return 'inconclusive';
+    return report.ok === false ? 'fail' : 'pass';
+}
+
+function _tag(verdict) {
+    return verdict === 'pass' ? 'PASS' : (verdict === 'fail' ? 'FAIL' : 'INCONCLUSIVE');
+}
+
+/**
+ * Human-readable console output: a verdict line, the counted/excluded tallies,
+ * and one line per violation. ASCII tags, no emoji, per the convention.
+ * @param {GateReport} report
+ * @returns {string}
+ */
+export function formatConsole(report) {
+    var verdict = _verdictOf(report);
+    var lines = ['[' + _tag(verdict) + '] lite-layout-profiler'];
+    if (report && typeof report === 'object') {
+        var counted = report.counted === undefined ? '?' : report.counted;
+        var total = report.total === undefined ? '?' : report.total;
+        lines.push('  ' + counted + ' counted reflow' + (counted === 1 ? '' : 's') +
+            ' of ' + total + ' recorded' +
+            (report.excluded ? ' (' + report.excluded + ' excluded)' : ''));
+        var vs = report.violations;
+        if (Array.isArray(vs) && vs.length > 0) {
+            for (var i = 0; i < vs.length; i++) {
+                var v = vs[i];
+                if (v === null || typeof v !== 'object') { lines.push('  - (malformed violation)'); continue; }
+                lines.push('  - ' + (v.metric || '?') + ': ' + (v.reason || '(no reason)'));
+            }
+        }
+        if (verdict === 'inconclusive') {
+            lines.push('  verdict is inconclusive: a rule could not be verified against this run');
+        }
+    }
+    return lines.join('\n');
+}
+
+/**
+ * The layout.json envelope: schema-versioned, with the derived verdict at the
+ * top for quick reads and the raw checkNoReflow report verbatim underneath.
+ * @param {GateReport} report
+ * @returns {string}
+ */
+export function formatJson(report) {
+    return JSON.stringify({
+        schema: REPORT_SCHEMA,
+        version: VERSION,
+        generatedAt: new Date().toISOString(),
+        verdict: _verdictOf(report),
+        report: report
+    }, null, 2);
+}
+
+/**
+ * GitHub-flavored markdown, PR-comment ready. Text tags, not emoji.
+ * @param {GateReport} report
+ * @returns {string}
+ */
+export function formatMarkdown(report) {
+    var verdict = _verdictOf(report);
+    var out = ['**lite-layout-profiler: ' + _tag(verdict) + '**', ''];
+    if (report && typeof report === 'object') {
+        out.push('| metric | value |');
+        out.push('| --- | --- |');
+        out.push('| counted | ' + (report.counted === undefined ? '?' : report.counted) + ' |');
+        out.push('| total recorded | ' + (report.total === undefined ? '?' : report.total) + ' |');
+        out.push('| excluded | ' + (report.excluded || 0) + ' |');
+        var vs = report.violations;
+        if (Array.isArray(vs) && vs.length > 0) {
+            out.push('');
+            out.push('Violations:');
+            for (var i = 0; i < vs.length; i++) {
+                var v = vs[i];
+                if (v === null || typeof v !== 'object') { out.push('- (malformed violation)'); continue; }
+                out.push('- `' + (v.metric || '?') + '` -- ' + (v.reason || '(no reason)'));
+            }
+        }
+    }
+    return out.join('\n');
+}
+
+function _ghSafe(s) {
+    // GitHub workflow commands are newline-delimited and use % : , as control
+    // chars in properties; escape so a reason cannot break out of the command.
+    return String(s === undefined || s === null ? '' : s)
+        .replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+
+/**
+ * GitHub Actions workflow annotations: one ::error per violation on a failing
+ * gate, a single ::warning on inconclusive, nothing on pass.
+ * @param {GateReport} report
+ * @returns {string}
+ */
+export function formatGithubAnnotations(report) {
+    var verdict = _verdictOf(report);
+    var title = 'lite-layout-profiler';
+    var lines = [];
+    if (verdict === 'fail' && report && Array.isArray(report.violations)) {
+        for (var i = 0; i < report.violations.length; i++) {
+            var v = report.violations[i];
+            if (v === null || typeof v !== 'object') {
+                lines.push('::error title=' + title + '::(malformed violation entry)');
+                continue;
+            }
+            lines.push('::error title=' + title + '::' + _ghSafe(v.metric) + ': ' + _ghSafe(v.reason));
+        }
+    } else if (verdict === 'inconclusive') {
+        lines.push('::warning title=' + title + '::verdict inconclusive -- a rule could not be verified against this run');
+    }
+    return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------

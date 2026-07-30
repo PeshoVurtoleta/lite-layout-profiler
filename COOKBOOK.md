@@ -1018,3 +1018,46 @@ a rule that cannot be verified fails rather than passes.
   for gating. `lite-gc-profiler` is precise in node and heuristic in the
   browser. They cover opposite halves of the same frame budget: bytes
   and layout.
+
+## Recipe 19: Pro: gating a captured report in CI with the CLI
+
+**Goal.** Fail a CI job when a page triggers forced reflows, without running a
+browser inside the gate step.
+
+**Primitive.** `formatJson` in the browser, `lite-layout-gate` in CI.
+
+**Why two steps.** Layout is only real in a browser; there is nothing to measure
+in Node. So the browser records and gates, writes the verdict to a file, and the
+CLI -- which needs no DOM -- turns that file into an exit code. This is the honest
+split, and it is why there is no `lite-layout-gate run`: a headless stub forces
+no layout, so a gate that "ran" one would be theatre.
+
+**Step 1 -- capture in the page (e.g. from a Playwright test).**
+
+```js
+// inside page.evaluate, after exercising the UI under test:
+import { checkNoReflow, formatJson } from '@zakkster/lite-layout-profiler';
+const json = formatJson(checkNoReflow(profiler.summary(), { maxReflows: 0 }));
+// return `json` to the test runner, which writes it to layout.json on disk
+```
+
+**Step 2 -- gate the file in CI.**
+
+```sh
+npx lite-layout-gate layout.json --format github
+```
+
+`--format github` prints `::error` annotations that land on the PR diff. The
+exit code drives the job: 0 pass, 1 fail, 2 inconclusive, 3 infrastructure
+error. Treat 2 as you like -- fail the job if you require every rule to be
+verifiable, or allow it if partial coverage is expected on some hosts.
+
+**Prepublish self-gate.** The package dogfoods this: `prepublishOnly` gates two
+checked-in fixtures (a clean report and a failing one), so a regression in the
+exit contract fails the publish, not a downstream user.
+
+**Reading the verdict.** The CLI derives the verdict from the report's
+`ok`/`verified` booleans; `verified` must be exactly `true` for a pass or fail,
+so a run that could not verify a rule is inconclusive, never a silent green.
+Feeding the CLI a summary instead of a report exits 3 with a redirect -- a
+summary has no verdict until rules are applied, and that is the browser's job.

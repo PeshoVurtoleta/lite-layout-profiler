@@ -306,6 +306,31 @@ export declare function assertNoReflow(
     rules?: ReflowRules
 ): GateReport;
 
+/** The pass/fail/inconclusive verdict, derived from a report's ok/verified. */
+export type GateVerdict = 'pass' | 'fail' | 'inconclusive';
+
+/**
+ * Derive the verdict from a checkNoReflow report (v1.6). Pure projection of
+ * ok/verified: verified===false is inconclusive, a verified breach is fail,
+ * a verified clean run is pass.
+ */
+export declare function _verdictOf(report: GateReport): GateVerdict;
+
+/** Human-readable console output with a verdict line and per-violation reasons (v1.6). */
+export declare function formatConsole(report: GateReport): string;
+
+/**
+ * The layout.json envelope (v1.6): a schema-versioned JSON string carrying the
+ * derived verdict and the raw checkNoReflow report. Schema lite-layout-report/1.
+ */
+export declare function formatJson(report: GateReport): string;
+
+/** PR-comment-ready GitHub-flavored markdown table (v1.6). */
+export declare function formatMarkdown(report: GateReport): string;
+
+/** GitHub Actions workflow annotations: ::error per violation, ::warning on inconclusive (v1.6). */
+export declare function formatGithubAnnotations(report: GateReport): string;
+
 /**
  * Create a forced-reflow detector. Patches Element/HTMLElement prototypes
  * to flag read-after-write within the same synchronous task.
