@@ -1,5 +1,67 @@
 # Changelog
 
+## 1.7.0
+
+The cross-realm / iframe lane. Until now every patch bound to the main realm's
+prototypes -- `Element.prototype`, `HTMLElement.prototype`, `window` -- read from
+the ambient scope. An iframe is a separate realm with its own copies of those
+objects, so a reflow forced through a child frame's element
+(`iframe.contentWindow.document.body.offsetWidth`) read a getter we never
+patched and fired unseen. The profiler reported a clean run while the frame
+thrashed. v1.7 lets one profiler instrument additional realms, so a child
+frame's reflows land in the same records, summary, and gate.
+
+### Added
+
+- **`profiler.addRealm(source)`** -- instrument an additional realm. `source` is
+  an iframe's `contentWindow` (same-origin) or a realm-descriptor object
+  (`{ Element, HTMLElement, Node, CSSStyleDeclaration, DOMTokenList,
+  SVGGraphicsElement, window }`, all optional) for synthetic/testing use.
+  Returns a handle `{ available, reason?, realmIndex, remove() }`.
+- **`handle.remove()`** -- restore just this realm's patches (LIFO,
+  identity-checked, idempotent, throw-safe if the frame is already gone).
+  `destroy()` still tears down every realm.
+- **`summary().patched.realms`** -- how many realms are instrumented (1 = main
+  only). An unusable or cross-origin realm is not counted; it is a documented
+  blind spot, not coverage.
+
+### Behaviour
+
+- The default (main) realm is instrumented exactly as before: a profiler with no
+  `addRealm` produces byte-identical summary and provenance to v1.6. The whole
+  patch/teardown machinery was already realm-agnostic (`patchGetter(proto, ...)`
+  never cared which realm a prototype came from); v1.7 parameterises the
+  *sourcing* of prototypes over a realm descriptor.
+- Coverage AND-s across realms: a hole in any instrumented realm makes the run
+  incomplete, with the failing target namespaced (`realm:1.read:offsetWidth`).
+  An unusable realm never lowers completeness -- we never claimed to see into it.
+- Degrades, never throws: a cross-origin `contentWindow` (property access
+  throws), a scalar, or an empty object yields
+  `{ available: false, reason: 'unusable_realm' }`. `addRealm` after `destroy`
+  yields `reason: 'inactive'`.
+
+### Documented limits
+
+- No auto-following of iframe navigation and no auto-discovery of frames. Both
+  would need load listeners and a frame-tree walk this dep-free library cannot
+  own, and silently patching frames the caller did not name is exactly the magic
+  the ecosystem refuses. The caller names each realm; a navigated frame is a new
+  `addRealm` if the caller wants it.
+- Cross-origin frames are same-origin-only by the platform's rules; their realm
+  is unreachable and reported as a blind spot.
+- Real-browser cross-realm end-to-end is proven only in a real browser. The
+  tests use synthetic realms (fresh prototype objects) because happy-dom shares
+  prototypes across Windows; they prove the machinery, the same posture the cost
+  lane takes for real layout.
+
+### Tests
+
+25 new (12 standard in `test/11-realm.test.mjs`, 13 torture in
+`test/torture/l7-5-realm.test.mjs`, axes M-P: a second realm's reflow caught
+only once added; remove/teardown restores exactly, LIFO, idempotent, throw-safe;
+unusable realms degrade without throwing or lowering completeness; per-realm
+provenance namespaced and AND-ed). Full suite: 380.
+
 ## 1.6.0
 
 The reporting layer and a CLI gate, delivering "CLI gate + layout.json +

@@ -1061,3 +1061,54 @@ exit contract fails the publish, not a downstream user.
 so a run that could not verify a rule is inconclusive, never a silent green.
 Feeding the CLI a summary instead of a report exits 3 with a redirect -- a
 summary has no verdict until rules are applied, and that is the browser's job.
+
+## Recipe 20: Pro: catching reflows inside an iframe
+
+**Goal.** Your app embeds a same-origin iframe -- a chart, a widget, a preview
+pane -- and you want its forced reflows counted alongside the host page's, in one
+gate.
+
+**Primitive.** `profiler.addRealm(iframe.contentWindow)`.
+
+**Why the default profiler misses it.** Every patch binds to the main realm's
+prototypes. `iframe.contentWindow.HTMLElement.prototype` is a *different object*
+than the host's, so a `write; read` inside the frame reads a getter the host
+profiler never wrapped. Nothing is recorded; the run looks clean while the frame
+thrashes.
+
+**Code.**
+
+```js
+const profiler = createLayoutProfiler();
+
+const iframe = document.querySelector('iframe#preview');
+// Wait until the frame's document exists (load), then instrument its realm.
+iframe.addEventListener('load', () => {
+    const handle = profiler.addRealm(iframe.contentWindow);
+    if (!handle.available) {
+        // Cross-origin, or the frame is not reachable: a documented blind spot.
+        console.warn('preview frame not instrumented:', handle.reason);
+    }
+});
+
+// ...exercise the app and the frame...
+
+const report = checkNoReflow(profiler.summary(), { maxReflows: 0 });
+```
+
+**Reading the result.** `summary().patched.realms` tells you how many realms are
+instrumented. If the frame had a hole (a frozen prototype), the failing target
+is namespaced -- `realm:1.read:offsetWidth` -- and the run is `complete: false`,
+so the gate reports inconclusive rather than a false pass.
+
+**Gotchas.**
+
+- **Same-origin only.** A cross-origin frame's `contentWindow` throws on access;
+  `addRealm` returns `{ available: false, reason: 'unusable_realm' }`. You cannot
+  see into another origin, and the tool will not pretend to.
+- **Navigation.** If the frame navigates, its old realm is gone; call
+  `handle.remove()` (safe even if the prototypes are already gone) and
+  `addRealm` the new `contentWindow` on the next `load`. The profiler does not
+  auto-follow navigation -- it would need a lifecycle it cannot own dep-free.
+- **Teardown.** `profiler.destroy()` tears down every realm; you only need
+  `handle.remove()` for removing one frame while keeping the rest.

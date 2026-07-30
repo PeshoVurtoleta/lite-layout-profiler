@@ -486,6 +486,55 @@ An RO callback that writes layout, dirties, and forces the observer to refire
 is a self-perpetuating stall. A reflow inside such a callback is flagged
 `roFeedback: true` on its record and thrash group.
 
+## Cross-realm and iframes
+
+By default the profiler instruments the main realm: `Element.prototype`,
+`HTMLElement.prototype`, `window`, read from the page's own globals. An iframe
+is a *separate realm* with its own copies of those objects, so a reflow forced
+through a child frame's element is invisible to a main-realm profiler. `addRealm`
+closes that gap.
+
+```js
+const profiler = createLayoutProfiler();
+
+// Instrument a same-origin child frame.
+const handle = profiler.addRealm(iframe.contentWindow);
+
+// ...exercise the app, including the frame...
+
+// If the frame goes away (navigation, detach), remove just its patches:
+handle.remove();
+
+profiler.destroy();   // tears down every realm; the main realm last
+```
+
+`addRealm(source)` accepts an iframe's `contentWindow`, or a realm-descriptor
+object (`{ Element, HTMLElement, Node, CSSStyleDeclaration, DOMTokenList,
+SVGGraphicsElement, window }`, all optional) for tests and exotic hosts. It
+returns a handle:
+
+| field | meaning |
+| --- | --- |
+| `available` | whether the realm was usable and instrumented |
+| `reason` | when not: `'unusable_realm'` (cross-origin/garbage) or `'inactive'` (after destroy) |
+| `realmIndex` | 1-based index, or -1 when unavailable |
+| `remove()` | restore just this realm's patches; idempotent, throw-safe |
+
+`summary().patched.realms` reports how many realms are instrumented (1 = main
+only). Coverage AND-s across realms: a hole in any instrumented realm makes the
+run incomplete, with the failing target namespaced (`realm:1.read:offsetWidth`).
+An unusable realm is never counted and never lowers completeness -- it is a
+documented blind spot, not a coverage hole.
+
+**Limits, stated plainly.** Cross-origin frames are unreachable (the platform
+throws on `contentWindow` access) and are reported as blind spots. The profiler
+does not auto-follow iframe navigation or auto-discover frames -- both would need
+listeners and a frame-tree walk a dep-free library cannot own, and silently
+patching frames you did not name is not something this tool does. Name each realm
+you want watched; a navigated frame is a fresh `addRealm`. The mechanism is
+proven against synthetic realms in the test suite; the real-browser end-to-end,
+like real layout cost, is only truly proven in a real browser.
+
 ## API additions
 
 ### `checkNoReflow(summary, rules?)` -> `GateReport`

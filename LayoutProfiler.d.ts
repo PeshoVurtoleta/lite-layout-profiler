@@ -105,6 +105,13 @@ export interface PatchCoverage {
     /** Targets absent from this host. Not a hole: nothing can flow through them. */
     skipped: number;
     /**
+     * How many realms are instrumented (v1.7): 1 for the main realm only, more
+     * when addRealm has added iframe/synthetic realms. An unusable or
+     * cross-origin realm is not counted -- it is a documented blind spot, not
+     * coverage. (0 only in the no-DOM stub summary.)
+     */
+    realms: number;
+    /**
      * Targets verifiably already wrapped by another lite-layout-profiler
      * instance when we instrumented (v1.4). We still wrap on top and detect
      * reflows, but we do not cleanly own the path, so coverage is not complete.
@@ -205,8 +212,45 @@ export interface LayoutProfiler {
      * cannot strand it. Synchronous scope only -- an await inside fn escapes it.
      */
     expected<T>(fn: () => T): T;
+    /**
+     * Instrument an additional realm (v1.7): an iframe's `contentWindow`
+     * (same-origin), or a realm-descriptor object for synthetic/testing use.
+     * A cross-origin frame or an unusable source degrades to an unavailable
+     * handle -- never throws, and does not count toward coverage. Returns a
+     * handle whose `remove()` restores just this realm's patches (destroy()
+     * still tears down everything).
+     */
+    addRealm(source: Window | RealmDescriptor): RealmHandle;
     /** Serialisable snapshot for the gate. */
     summary(): ViolationSummary;
+}
+
+/**
+ * A realm-descriptor: the bundle of constructors + window a set of patches
+ * binds to (v1.7). All fields optional; a minimal descriptor yields fewer
+ * targets, the same way a missing global does. An iframe's contentWindow
+ * satisfies the Window overload; this object form is for synthetic realms.
+ */
+export interface RealmDescriptor {
+    Element?: typeof Element;
+    HTMLElement?: typeof HTMLElement;
+    Node?: typeof Node;
+    CSSStyleDeclaration?: typeof CSSStyleDeclaration;
+    DOMTokenList?: typeof DOMTokenList;
+    SVGGraphicsElement?: unknown;
+    window?: unknown;
+}
+
+/** Handle returned by addRealm (v1.7). */
+export interface RealmHandle {
+    /** True if the realm was usable and instrumented. */
+    readonly available: boolean;
+    /** Why the realm was not instrumented, when available is false. */
+    readonly reason?: 'inactive' | 'unusable_realm' | (string & {});
+    /** The realm's index (1-based), or -1 if unavailable. */
+    readonly realmIndex: number;
+    /** Restore just this realm's patches. Idempotent; safe if already gone. */
+    remove(): void;
 }
 
 /**

@@ -63,7 +63,7 @@
 // Copyright (c) 2026 Zahary Shinikchiev <shinikchiev@yahoo.com>
 // MIT License
 
-export const VERSION = '1.6.0';
+export const VERSION = '1.7.0';
 
 // The brand we stamp on every wrapper we install, so a later instrument-time
 // check can tell OUR wrapper from a foreign one with certainty. Symbol.for
@@ -120,48 +120,89 @@ export const READ_NAMES = ELEMENT_GETTERS
 // We patch the MOST COMMON paths. Exotic mutations (CSSOM insertRule,
 // adoptedStyleSheets, etc.) are out of scope for a lightweight detector.
 
-function buildWriteTargets() {
+// A realm is the bundle of constructors + window that a set of patches binds
+// to (v1.7). The default realm is the ambient globals; an iframe is a separate
+// realm with its own copies of these objects. Every field is optional -- a
+// minimal host or a partial realm descriptor simply yields fewer targets, the
+// same way a missing global does today.
+function _ambientRealm() {
+    return {
+        Element: typeof Element !== 'undefined' ? Element : undefined,
+        HTMLElement: typeof HTMLElement !== 'undefined' ? HTMLElement : undefined,
+        Node: typeof Node !== 'undefined' ? Node : undefined,
+        CSSStyleDeclaration: typeof CSSStyleDeclaration !== 'undefined' ? CSSStyleDeclaration : undefined,
+        DOMTokenList: typeof DOMTokenList !== 'undefined' ? DOMTokenList : undefined,
+        SVGGraphicsElement: typeof SVGGraphicsElement !== 'undefined' ? SVGGraphicsElement : undefined,
+        window: typeof window !== 'undefined' ? window : undefined
+    };
+}
+
+// Build a realm descriptor from a Window (the iframe.contentWindow case) or
+// pass through an object that already looks like a realm descriptor (for
+// synthetic realms and testing). Returns null if the source is unusable -- a
+// cross-origin contentWindow whose property access throws degrades here to
+// null, which the caller reports as an unavailable realm rather than a crash.
+function _realmFromWindow(win) {
+    if (win === null || typeof win !== 'object') return null;
+    try {
+        // If it already carries constructor fields, treat it as a descriptor.
+        if (win.Element || win.HTMLElement || win.Node) {
+            return {
+                Element: win.Element, HTMLElement: win.HTMLElement, Node: win.Node,
+                CSSStyleDeclaration: win.CSSStyleDeclaration, DOMTokenList: win.DOMTokenList,
+                SVGGraphicsElement: win.SVGGraphicsElement,
+                window: win.window || (win.getComputedStyle ? win : undefined)
+            };
+        }
+        return null;
+    } catch (e) {
+        // Cross-origin access throws; that is a blind spot, not an error.
+        return null;
+    }
+}
+
+function buildWriteTargets(realm) {
     var targets = [];
 
     // Style mutations
-    if (typeof CSSStyleDeclaration !== 'undefined') {
-        targets.push([CSSStyleDeclaration.prototype, 'setProperty', 'method']);
-        targets.push([CSSStyleDeclaration.prototype, 'removeProperty', 'method']);
-        targets.push([CSSStyleDeclaration.prototype, 'cssText', 'setter']);
+    if (realm.CSSStyleDeclaration !== undefined) {
+        targets.push([realm.CSSStyleDeclaration.prototype, 'setProperty', 'method']);
+        targets.push([realm.CSSStyleDeclaration.prototype, 'removeProperty', 'method']);
+        targets.push([realm.CSSStyleDeclaration.prototype, 'cssText', 'setter']);
     }
 
     // Class mutations
-    if (typeof Element !== 'undefined') {
-        targets.push([Element.prototype, 'className', 'setter']);
-        targets.push([Element.prototype, 'setAttribute', 'method']);
-        targets.push([Element.prototype, 'removeAttribute', 'method']);
-        targets.push([Element.prototype, 'toggleAttribute', 'method']);
+    if (realm.Element !== undefined) {
+        targets.push([realm.Element.prototype, 'className', 'setter']);
+        targets.push([realm.Element.prototype, 'setAttribute', 'method']);
+        targets.push([realm.Element.prototype, 'removeAttribute', 'method']);
+        targets.push([realm.Element.prototype, 'toggleAttribute', 'method']);
     }
 
     // classList mutations
-    if (typeof DOMTokenList !== 'undefined') {
-        targets.push([DOMTokenList.prototype, 'add', 'method']);
-        targets.push([DOMTokenList.prototype, 'remove', 'method']);
-        targets.push([DOMTokenList.prototype, 'toggle', 'method']);
-        targets.push([DOMTokenList.prototype, 'replace', 'method']);
+    if (realm.DOMTokenList !== undefined) {
+        targets.push([realm.DOMTokenList.prototype, 'add', 'method']);
+        targets.push([realm.DOMTokenList.prototype, 'remove', 'method']);
+        targets.push([realm.DOMTokenList.prototype, 'toggle', 'method']);
+        targets.push([realm.DOMTokenList.prototype, 'replace', 'method']);
     }
 
     // DOM tree mutations
-    if (typeof Node !== 'undefined') {
-        targets.push([Node.prototype, 'appendChild', 'method']);
-        targets.push([Node.prototype, 'insertBefore', 'method']);
-        targets.push([Node.prototype, 'removeChild', 'method']);
-        targets.push([Node.prototype, 'replaceChild', 'method']);
-        targets.push([Node.prototype, 'textContent', 'setter']);
+    if (realm.Node !== undefined) {
+        targets.push([realm.Node.prototype, 'appendChild', 'method']);
+        targets.push([realm.Node.prototype, 'insertBefore', 'method']);
+        targets.push([realm.Node.prototype, 'removeChild', 'method']);
+        targets.push([realm.Node.prototype, 'replaceChild', 'method']);
+        targets.push([realm.Node.prototype, 'textContent', 'setter']);
     }
 
     // innerHTML / innerText
-    if (typeof Element !== 'undefined') {
-        targets.push([Element.prototype, 'innerHTML', 'setter']);
-        targets.push([Element.prototype, 'outerHTML', 'setter']);
+    if (realm.Element !== undefined) {
+        targets.push([realm.Element.prototype, 'innerHTML', 'setter']);
+        targets.push([realm.Element.prototype, 'outerHTML', 'setter']);
     }
-    if (typeof HTMLElement !== 'undefined') {
-        targets.push([HTMLElement.prototype, 'innerText', 'setter']);
+    if (realm.HTMLElement !== undefined) {
+        targets.push([realm.HTMLElement.prototype, 'innerText', 'setter']);
     }
 
     return targets;
@@ -1008,6 +1049,7 @@ export function createLayoutProfiler(options) {
                 return {
                     total: 0, stored: 0, truncated: false, stacks: false,
                     patched: { applied: 0, failed: 0, skipped: 0, foreign: 0,
+                        realms: 0,
                         complete: false, provenance: {},
                         failures: ['no DOM in this environment'] },
                     byRead: {}, byWrite: {}, byTask: {}, taskCount: 0,
@@ -1312,6 +1354,11 @@ export function createLayoutProfiler(options) {
     // ('owned') target is not listed, to keep the map small.
     var patchForeign = 0;
     var provenance = {};
+    // v1.7: how many realms are instrumented (1 = the default/main realm only).
+    // A cross-origin or unusable added realm is NOT counted -- we never claimed
+    // to see into it, so it is a documented blind spot, not a lowered coverage.
+    var realmCount = 1;
+    var nextRealmIndex = 0;
     // This instance's id, stamped into every wrapper's brand, so a second
     // profiler instance can tell OUR wrappers from ITS wrappers with certainty.
     var instanceId = 'llp-' + (Math.random().toString(36).slice(2, 10));
@@ -1463,28 +1510,31 @@ export function createLayoutProfiler(options) {
     }
 
     // Patch getBoundingClientRect.
-    function patchBCR() {
-        var original = Element.prototype.getBoundingClientRect;
+    function patchBCR(realm) {
+        if (realm.Element === undefined) return 'absent';
+        var proto = realm.Element.prototype;
+        var original = proto.getBoundingClientRect;
         if (typeof original !== 'function') return 'absent';
         var wrapBcr = measuredCall(original, 'getBoundingClientRect()');
-        Element.prototype.getBoundingClientRect = wrapBcr;
+        proto.getBoundingClientRect = wrapBcr;
         patches.push(function () {
-            if (Element.prototype.getBoundingClientRect === wrapBcr) {
-                Element.prototype.getBoundingClientRect = original;
+            if (proto.getBoundingClientRect === wrapBcr) {
+                proto.getBoundingClientRect = original;
             }
         });
         return true;
     }
 
     // Patch getComputedStyle.
-    function patchGCS() {
-        if (typeof window === 'undefined') return 'absent';
-        var original = window.getComputedStyle;
+    function patchGCS(realm) {
+        var win = realm.window;
+        if (win === undefined) return 'absent';
+        var original = win.getComputedStyle;
         if (typeof original !== 'function') return 'absent';
-        var wrapGcs = measuredCall(original, 'getComputedStyle()', window);
-        window.getComputedStyle = wrapGcs;
+        var wrapGcs = measuredCall(original, 'getComputedStyle()', win);
+        win.getComputedStyle = wrapGcs;
         patches.push(function () {
-            if (window.getComputedStyle === wrapGcs) window.getComputedStyle = original;
+            if (win.getComputedStyle === wrapGcs) win.getComputedStyle = original;
         });
         return true;
     }
@@ -1493,9 +1543,9 @@ export function createLayoutProfiler(options) {
     // coordinate space forces layout the same way getBoundingClientRect does.
     // Essential for reactive charting / dataviz code that reads geometry to
     // position tooltips or hit-test paths.
-    function patchSvgReads() {
-        if (typeof SVGGraphicsElement === 'undefined') return 'absent';
-        var proto = SVGGraphicsElement.prototype;
+    function patchSvgReads(realm) {
+        if (realm.SVGGraphicsElement === undefined) return 'absent';
+        var proto = realm.SVGGraphicsElement.prototype;
         var names = ['getBBox', 'getCTM', 'getScreenCTM'];
         for (var i = 0; i < names.length; i++) {
             (function (name) {
@@ -1517,17 +1567,17 @@ export function createLayoutProfiler(options) {
     // half; a wrote-then-scrolled sequence is the exact anti-pattern the tool
     // exists to catch. Scroll changes themselves don't invalidate layout
     // (only paint), so we don't markDirty afterwards.
-    function patchScrollMethods() {
+    function patchScrollMethods(realm) {
         var targets = [];
-        if (typeof Element !== 'undefined') {
-            targets.push([Element.prototype, 'scrollIntoView']);
-            targets.push([Element.prototype, 'scrollTo']);
-            targets.push([Element.prototype, 'scrollBy']);
+        if (realm.Element !== undefined) {
+            targets.push([realm.Element.prototype, 'scrollIntoView']);
+            targets.push([realm.Element.prototype, 'scrollTo']);
+            targets.push([realm.Element.prototype, 'scrollBy']);
         }
-        if (typeof window !== 'undefined') {
-            targets.push([window, 'scrollTo']);
-            targets.push([window, 'scrollBy']);
-            targets.push([window, 'scroll']);
+        if (realm.window !== undefined) {
+            targets.push([realm.window, 'scrollTo']);
+            targets.push([realm.window, 'scrollBy']);
+            targets.push([realm.window, 'scroll']);
         }
         for (var i = 0; i < targets.length; i++) {
             (function (obj, name) {
@@ -1548,17 +1598,18 @@ export function createLayoutProfiler(options) {
     // innerWidth / innerHeight may or may not depending on browser -- included
     // defensively since legacy UI libraries substitute them for the
     // documentElement.clientWidth idiom.
-    function patchWindowMetrics() {
-        if (typeof window === 'undefined') return 'absent';
+    function patchWindowMetrics(realm) {
+        var win = realm.window;
+        if (win === undefined) return 'absent';
         var names = ['innerWidth', 'innerHeight', 'scrollX', 'scrollY', 'pageXOffset', 'pageYOffset'];
         for (var i = 0; i < names.length; i++) {
             (function (name) {
                 // Getters may be installed as own-properties or on the
                 // Window prototype -- try both.
-                var target = window;
-                var desc = Object.getOwnPropertyDescriptor(window, name);
+                var target = win;
+                var desc = Object.getOwnPropertyDescriptor(win, name);
                 if (!desc) {
-                    var proto = Object.getPrototypeOf(window);
+                    var proto = Object.getPrototypeOf(win);
                     if (proto) {
                         desc = Object.getOwnPropertyDescriptor(proto, name);
                         if (desc) target = proto;
@@ -1743,9 +1794,9 @@ export function createLayoutProfiler(options) {
     // We restore all patched properties in a single `patches` entry to
     // keep the closure count sane -- CSSStyleDeclaration.prototype has
     // ~400 property setters.
-    function patchAllCssSetters() {
-        if (typeof CSSStyleDeclaration === 'undefined') return 'absent';
-        var proto = CSSStyleDeclaration.prototype;
+    function patchAllCssSetters(realm) {
+        if (realm.CSSStyleDeclaration === undefined) return 'absent';
+        var proto = realm.CSSStyleDeclaration.prototype;
         var names = Object.getOwnPropertyNames(proto);
         var restored = [];
         var candidates = 0;
@@ -1794,41 +1845,103 @@ export function createLayoutProfiler(options) {
     // an incomplete net is reported to the gate as unverifiable rather than
     // being allowed to masquerade as a clean run.
 
-    // 1. Write-side: mark dirty on DOM mutations.
-    var writeTargets = buildWriteTargets();
-    for (var wi = 0; wi < writeTargets.length; wi++) {
-        (function (wt) {
-            var srcName = (wt[0].constructor && wt[0].constructor.name) || 'DOM';
-            attempt(srcName + '.' + wt[1], function () {
-                return wt[2] === 'method'
-                    ? patchMethod(wt[0], wt[1], srcName)
-                    : patchSetter(wt[0], wt[1], srcName);
-            });
-        }(writeTargets[wi]));
+    // Instrument one realm (v1.7). The default realm is the ambient globals;
+    // an added realm is an iframe's contentWindow. Labels are prefixed so a
+    // second realm's provenance stays separate from the main realm's, and every
+    // restore closure goes onto `patches` (torn down by destroy) -- addRealm
+    // ALSO tracks its own slice so a single realm can be removed on its own.
+    // Returns the count of patches.length before it ran, so addRealm can slice.
+    function instrumentRealm(realm, prefix) {
+        // 1. Write-side: mark dirty on DOM mutations.
+        var writeTargets = buildWriteTargets(realm);
+        for (var wi = 0; wi < writeTargets.length; wi++) {
+            (function (wt) {
+                var srcName = (wt[0].constructor && wt[0].constructor.name) || 'DOM';
+                attempt(prefix + srcName + '.' + wt[1], function () {
+                    return wt[2] === 'method'
+                        ? patchMethod(wt[0], wt[1], srcName)
+                        : patchSetter(wt[0], wt[1], srcName);
+                });
+            }(writeTargets[wi]));
+        }
+
+        // 2. Write-side: per-property setters on CSSStyleDeclaration.prototype.
+        //    Catches `el.style.width = X` etc. in real browsers.
+        attempt(prefix + 'CSSStyleDeclaration.<per-property setters>', function () {
+            return patchAllCssSetters(realm);
+        });
+
+        // 3. Read-side: flag forced reflows on layout getters.
+        var readProto = realm.HTMLElement !== undefined
+            ? realm.HTMLElement.prototype
+            : (realm.Element !== undefined ? realm.Element.prototype : null);
+        if (readProto !== null) {
+            for (var gi = 0; gi < ELEMENT_GETTERS.length; gi++) {
+                (function (n) {
+                    attempt(prefix + 'read:' + n, function () { return patchGetter(readProto, n); });
+                }(ELEMENT_GETTERS[gi]));
+            }
+            for (var si = 0; si < ELEMENT_GETSET.length; si++) {
+                (function (n) {
+                    attempt(prefix + 'read:' + n, function () { return patchGetter(readProto, n); });
+                }(ELEMENT_GETSET[si]));
+            }
+        }
+        attempt(prefix + 'read:getBoundingClientRect', function () { return patchBCR(realm); });
+        attempt(prefix + 'read:getComputedStyle', function () { return patchGCS(realm); });
+        attempt(prefix + 'read:svg', function () { return patchSvgReads(realm); });
+        attempt(prefix + 'read:scrollMethods', function () { return patchScrollMethods(realm); });
+        attempt(prefix + 'read:windowMetrics', function () { return patchWindowMetrics(realm); });
     }
 
-    // 2. Write-side: per-property setters on CSSStyleDeclaration.prototype.
-    //    Catches `el.style.width = X` etc. in real browsers.
-    attempt('CSSStyleDeclaration.<per-property setters>', patchAllCssSetters);
+    // Instrument the default (ambient) realm. No prefix -- its labels are the
+    // v1.6 labels verbatim, so a single-realm profiler's provenance is
+    // byte-identical to before.
+    instrumentRealm(_ambientRealm(), '');
 
-    // 3. Read-side: flag forced reflows on layout getters.
-    var readProto = typeof HTMLElement !== 'undefined'
-        ? HTMLElement.prototype : Element.prototype;
-    for (var gi = 0; gi < ELEMENT_GETTERS.length; gi++) {
-        (function (n) {
-            attempt('read:' + n, function () { return patchGetter(readProto, n); });
-        }(ELEMENT_GETTERS[gi]));
+    // Add a realm to instrument (v1.7): an iframe's contentWindow (same-origin),
+    // or a realm-descriptor object for synthetic/testing use. Returns a handle:
+    //
+    //   { remove(), realmIndex, available, reason? }
+    //
+    // A cross-origin frame (whose contentWindow throws on access) or a source
+    // with no usable constructors degrades to an unavailable handle -- never a
+    // throw, and it does not count toward realmCount or lower completeness.
+    // handle.remove() restores JUST this realm's patches (LIFO, identity-checked,
+    // idempotent, throw-safe if the frame is already gone). destroy() still tears
+    // down everything.
+    function addRealm(source) {
+        if (!active) {
+            return { available: false, reason: 'inactive', realmIndex: -1, remove: function () {} };
+        }
+        var realm = _realmFromWindow(source);
+        if (realm === null || (realm.Element === undefined && realm.HTMLElement === undefined)) {
+            // Nothing usable to patch -- cross-origin, or not a realm at all.
+            return { available: false, reason: 'unusable_realm', realmIndex: -1, remove: function () {} };
+        }
+        var index = ++nextRealmIndex;
+        var prefix = 'realm:' + index + '.';
+        var startLen = patches.length;
+        instrumentRealm(realm, prefix);
+        // The restore closures this realm added are patches[startLen .. end].
+        // Capture them so remove() can run just this slice, and null them in the
+        // main array so destroy() does not run them twice.
+        var mine = patches.slice(startLen);
+        realmCount++;
+        var removed = false;
+        function remove() {
+            if (removed) return;
+            removed = true;
+            realmCount--;
+            for (var i = mine.length - 1; i >= 0; i--) {
+                var idx = startLen + i;
+                // Only clear the slot if it is still ours (destroy may have run).
+                if (patches[idx] === mine[i]) patches[idx] = function () {};
+                try { mine[i](); } catch (e) { void e; }
+            }
+        }
+        return { available: true, realmIndex: index, remove: remove };
     }
-    for (var si = 0; si < ELEMENT_GETSET.length; si++) {
-        (function (n) {
-            attempt('read:' + n, function () { return patchGetter(readProto, n); });
-        }(ELEMENT_GETSET[si]));
-    }
-    attempt('read:getBoundingClientRect', patchBCR);
-    attempt('read:getComputedStyle', patchGCS);
-    attempt('read:svg', patchSvgReads);
-    attempt('read:scrollMethods', patchScrollMethods);
-    attempt('read:windowMetrics', patchWindowMetrics);
 
     // Phase lane wrappers (v1.3), only when opted in. Each sets currentPhase
     // for the duration of a scheduled callback, in a finally so a throwing
@@ -2049,6 +2162,10 @@ export function createLayoutProfiler(options) {
                 applied: patchApplied,
                 failed: patchFailed,
                 skipped: patchSkipped,
+                // v1.7: how many realms are instrumented (1 = main only). An
+                // added iframe realm raises this; an unusable/cross-origin realm
+                // does not (it is a documented blind spot, not coverage).
+                realms: realmCount,
                 // v1.4: targets verifiably already wrapped by another
                 // instrumenter. We still instrument them, but we do not cleanly
                 // own the path.
@@ -2123,6 +2240,7 @@ export function createLayoutProfiler(options) {
         destroy: destroy,
         reset: reset,
         expected: expected,
+        addRealm: addRealm,
         summary: summary
     };
 }

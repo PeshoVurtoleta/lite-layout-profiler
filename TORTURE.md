@@ -1,10 +1,11 @@
 # @zakkster/lite-layout-profiler -- Torture Test Plan
 
-**Status:** 178 torture scenarios shipped across v1.2.0, v1.3.0, v1.4.0,
-v1.5.0, and v1.6.0 (slots L1.5, L2.5, L3.5, L99.9, L4.5, L4.6, L5.5, L6.5).
-Axes A-I from v1.2, plus J-L added in v1.6 for the reporting layer and CLI;
-the phase lane (L4.5) reuses A-E, the provenance lane (L4.6) reuses A-D, and
-the expected-scope lane (L5.5) reuses A-D, with lane-specific meanings. v1.2's
+**Status:** 203 torture scenarios shipped across v1.2.0, v1.3.0, v1.4.0,
+v1.5.0, v1.6.0, and v1.7.0 (slots L1.5, L2.5, L3.5, L99.9, L4.5, L4.6, L5.5,
+L6.5, L7.5). Axes A-I from v1.2, J-L added in v1.6 for the reporting layer and
+CLI, M-P added in v1.7 for the cross-realm lane; the phase lane (L4.5) reuses
+A-E, the provenance lane (L4.6) reuses A-D, and the expected-scope lane (L5.5)
+reuses A-D, with lane-specific meanings. v1.2's
 suite found 22 defects on first run; v1.3's L4.5 found 1 (`phasesObserved`
 reporting intent rather than whether rAF actually wrapped); v1.4's L4.6 surfaced
 the LIFO-teardown requirement for stacked instances. All fixed before release.
@@ -83,6 +84,25 @@ from the round-tripped report, across every verdict.
 **Axis L -- the CLI's exit code matches its printed verdict (v1.6).** 0/1/2
 track pass/fail/inconclusive exactly, and an unreadable input is always exit 3,
 never a silent 0.
+
+**Axis M -- a second realm's reflow is caught iff its realm is added (v1.7).**
+A write-then-read through an added realm's element is recorded in the same
+unified summary; the same pattern before the realm is added is invisible.
+
+**Axis N -- realm teardown restores exactly (v1.7).** `handle.remove()` restores
+only its realm and leaves the others recording; removal works in any order; it
+is idempotent and throw-safe when the realm's prototypes are already gone (an
+iframe navigated away); `destroy()` tears down every realm.
+
+**Axis O -- unusable realms degrade, never throw (v1.7).** A cross-origin
+`contentWindow` (property access throws), a scalar, an empty object -- each
+yields an unavailable handle, never a throw, and never lowers main-realm
+completeness.
+
+**Axis P -- per-realm coverage and provenance (v1.7).** A partly-patchable
+second realm records its holes namespaced (`realm:1.read:offsetWidth`), and
+`complete` AND-s across realms: a hole anywhere makes the run incomplete, while a
+clean realm changes nothing.
 
 ---
 
@@ -329,17 +349,53 @@ verdict -- not the test.
 
 ---
 
+### L7.5 -- Cross-realm / iframe lane (v1.7.0)
+
+`test/torture/l7-5-realm.test.mjs` -- 13 scenarios. Axes M (3), N (4), O (3),
+P (3).
+
+This lane makes the profiler patch objects it does not own in a SECOND realm and
+hand back one unified summary, so its failure modes are a missed cross-realm
+reflow, a teardown that strands a foreign prototype, an unusable realm that
+throws instead of degrading, and a coverage number that lies about a frame it
+could only partly patch. Realms are SYNTHETIC (fresh prototype objects) because
+happy-dom shares prototypes across Windows; the machinery is what is under test,
+and the real-browser end-to-end is a documented boundary, the same posture the
+cost lane takes.
+
+Axis M records a write-then-read through a second realm's element -- invisible
+before `addRealm`, caught after, and two realms feeding one total. Axis N
+removes realms in and out of order, proves `remove()` restores only its own
+realm while the others keep recording, and is idempotent and throw-safe when the
+realm's prototype has been replaced under it (a navigated frame); `destroy()`
+restores every realm. Axis O throws nine kinds of garbage and a
+property-access-throwing Proxy (a cross-origin `contentWindow`) at `addRealm` and
+asserts each degrades to an unavailable handle without throwing or lowering
+completeness. Axis P adds a realm whose `offsetWidth` is non-configurable (a real
+hole), and asserts the failure is namespaced `realm:1.*`, that `complete` flips
+to false (AND-ed across realms), and that a clean realm leaves completeness
+untouched.
+
+---
+
 ## Not in scope
 
 - **Real browser layout.** The stub DOM cannot force real layout, so
   cost figures here are driven by an injected clock. Torture proves the
   accounting; only a real engine proves the measurement.
-- **Cross-realm and iframe patching.** Arrives with the realm lane
-  (v1.7); its torture slot is L7.5.
+- **Real browser cross-realm end-to-end.** The cross-realm lane (L7.5,
+  v1.7) is proven against SYNTHETIC realms, because happy-dom shares
+  prototypes across Windows and cannot model true realm separation. The
+  machinery -- patching, per-realm teardown, namespaced coverage -- is
+  covered; the real-browser iframe end-to-end, like real layout cost,
+  is only truly proven in a real browser.
 - **Concurrency.** There are no threads in a document context, and the
   worker case has no DOM.
 
 ## Planned
 
-- **L7.5 -- cross-realm (v1.7).** Realm teardown ordering, an iframe
-  navigated mid-run, a document adopted between realms.
+- **ReflowForge viewer (v2.0).** A browser viewer for a serialised
+  `lite-layout-report/1`, the layout analogue of GCForge. Reads the
+  envelope `formatJson` produces and renders the counted/excluded
+  tallies, the per-violation reasons, and per-realm coverage. Report-only,
+  like GCForge; no schema it does not already receive.

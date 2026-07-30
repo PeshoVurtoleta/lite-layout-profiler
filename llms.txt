@@ -46,8 +46,19 @@ createLayoutProfiler(options?) -- start detecting.
 profiler.violations -- chronological snapshot of retained records, with stacks.
 profiler.violationCount -- exact total, even if the store was capped.
 profiler.summary() -- serialisable snapshot; the gate's input.
-profiler.destroy() -- unpatch all prototypes.
+profiler.destroy() -- unpatch all prototypes (every realm, main last).
 profiler.reset() -- clear records, keep active.
+profiler.addRealm(source) -- (v1.7) instrument an additional realm: an iframe's
+  contentWindow (same-origin) or a realm-descriptor object { Element, HTMLElement,
+  Node, CSSStyleDeclaration, DOMTokenList, SVGGraphicsElement, window } (all
+  optional). Returns { available, reason?, realmIndex, remove() }. remove()
+  restores JUST that realm (LIFO, idempotent, throw-safe). A cross-origin or
+  unusable source degrades to { available:false, reason:'unusable_realm' }, never
+  throws, and is not counted toward coverage. summary().patched.realms reports the
+  instrumented count (1 = main only). Coverage AND-s across realms; a hole is
+  namespaced (realm:1.read:offsetWidth). No auto-follow of navigation, no frame
+  discovery, cross-origin unreachable -- documented blind spots, caller names each
+  realm.
 
 checkNoReflow(summary, rules?) -- returns a GateReport, never throws on breach.
 assertNoReflow(summary, rules?) -- throws ReflowBudgetError on breach.
@@ -62,7 +73,7 @@ formatJson(report) -- the lite-layout-report/1 envelope: { schema, version,
 formatMarkdown(report) -- PR-comment table.
 formatGithubAnnotations(report) -- ::error per violation on fail, ::warning on
   inconclusive, empty on pass.
-VERSION -- '1.6.0'.
+VERSION -- '1.7.0'.
 
 ## CLI (v1.6): lite-layout-gate
 
