@@ -1,0 +1,998 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReflowForge -- viewer for @zakkster/lite-layout-profiler reports</title>
+<style>
+/* ---------------------------------------------------------------------------
+   GCForge 1.0.0
+   Copyright (c) 2026 Zahary Shinikchiev. MIT.
+   Tokens. Hex declared first, oklch second (progressive enhancement).
+   --------------------------------------------------------------------------- */
+:root {
+  --bg:            #080c11;
+  --bg:            oklch(0.16 0.015 250);
+  --panel:         #0f151d;
+  --panel:         oklch(0.21 0.018 250);
+  --panel-2:       #131b25;
+  --panel-2:       oklch(0.24 0.018 250);
+  --line:          #1e2836;
+  --line:          oklch(0.30 0.020 250);
+  --line-soft:     #172029;
+  --line-soft:     oklch(0.26 0.016 250);
+  --ink:           #d6dee8;
+  --ink:           oklch(0.89 0.015 250);
+  --ink-dim:       #7d8b9c;
+  --ink-dim:       oklch(0.64 0.022 250);
+  --ink-faint:     #55627a;
+  --ink-faint:     oklch(0.50 0.030 265);
+
+  /* Verdict channel. Pass is teal, not the usual green: green is the colour
+     people read as "fine, move on", and half this instrument's job is to stop
+     that reflex when nothing was actually verified. */
+  --pass:          #35d29a;
+  --pass:          oklch(0.79 0.145 168);
+  --fail:          #ff5f56;
+  --fail:          oklch(0.68 0.200 25);
+  --unknown:       #f2b03d;
+  --unknown:       oklch(0.80 0.140 75);
+  --void:          #55627a;
+  --void:          oklch(0.50 0.030 265);
+  --accent:        #c874ff;
+  --accent:        oklch(0.70 0.170 310);
+
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+
+  --r: 0.25rem;
+  --gap: 1rem;
+}
+
+/* Texture is the second channel. Colour alone would fail for a CVD reader, and
+   "inconclusive" must not survive being desaturated into "pass". */
+:root {
+  --hatch-unknown: repeating-linear-gradient(135deg,
+    transparent 0 0.28rem, color-mix(in oklab, var(--unknown) 22%, transparent) 0.28rem 0.42rem);
+  --hatch-void: repeating-linear-gradient(135deg,
+    transparent 0 0.22rem, color-mix(in oklab, var(--void) 40%, transparent) 0.22rem 0.34rem);
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 0.875rem;
+  line-height: 1.55;
+  padding: 0 1.25rem 5rem;
+}
+
+/* Hairlines stay in px: these are meant to be one device pixel, not to scale. */
+hr, .rule { border: 0; border-top: 1px solid var(--line); margin: 1.5rem 0; }
+
+a { color: var(--accent); text-underline-offset: 0.2em; }
+
+code {
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  border-radius: 2px;
+  padding: 0 0.25em;
+  font-size: 0.95em;
+}
+
+:is(button, input, summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.wrap { max-width: 72rem; margin: 0 auto; }
+
+/* ---- masthead ---------------------------------------------------------- */
+
+.masthead {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem 1rem;
+  padding: 2rem 0 1.25rem;
+  border-bottom: 1px solid var(--line);
+}
+.wordmark {
+  font-size: 1.5rem; font-weight: 700; letter-spacing: -0.03em; margin: 0;
+}
+.wordmark b { color: var(--accent); font-weight: 700; }
+.tagline { color: var(--ink-dim); margin: 0; }
+.masthead .privacy {
+  margin: 0; margin-left: auto; color: var(--ink-faint); font-size: 0.75rem;
+}
+
+/* ---- intake ------------------------------------------------------------ */
+
+#intake { padding: 2.5rem 0; }
+
+.dropzone {
+  border: 1px dashed var(--line);
+  border-radius: var(--r);
+  background: var(--panel);
+  padding: 3rem 1.5rem;
+  text-align: center;
+  transition: border-color 120ms, background 120ms;
+}
+.dropzone.armed {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 8%, var(--panel));
+}
+.dropzone h2 { margin: 0 0 0.35rem; font-size: 1.05rem; letter-spacing: -0.01em; }
+.dropzone p { margin: 0 0 1.25rem; color: var(--ink-dim); }
+
+.controls { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; }
+.controls.controls--start { justify-content: flex-start; margin-top: 0.5rem; }
+.controls.controls--start-lg { justify-content: flex-start; margin-top: 1.5rem; }
+
+button {
+  font: inherit; color: var(--ink);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 0.4rem 0.85rem;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  button:hover { border-color: var(--accent); color: #fff; }
+  .tab:hover { color: var(--ink); }
+}
+button.primary { border-color: var(--accent); color: var(--accent); }
+
+input[type="url"], textarea {
+  font: inherit; width: 100%;
+  color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: var(--r);
+  padding: 0.5rem 0.65rem;
+}
+textarea { min-height: 9rem; resize: vertical; }
+
+.intake-row { display: flex; gap: 0.5rem; margin-top: 1.25rem; }
+.intake-row input { flex: 1; }
+
+details.paste { margin-top: 1rem; }
+details.paste summary { cursor: pointer; color: var(--ink-dim); }
+
+.vgrid { border: 1px solid var(--line-soft); border-radius: 3px; overflow: hidden; }
+
+.vgrid-head, .vgrid-row {
+  display: grid;
+  font-size: 0.8125rem;
+  align-items: start;
+}
+
+.vgrid-head {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--ink-faint); font-size: 0.7rem;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+
+.vgrid-head > span, .vgrid-row > span {
+  padding: 0.5rem 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.vgrid-body { height: 26rem; }
+.vgrid-row { border-bottom: 1px solid var(--line-soft); }
+.vgrid-row > span.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.advisory {
+  border: 1px dashed var(--line);
+  border-radius: 3px;
+  padding: 0.75rem 1rem;
+  color: var(--ink-dim);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  background: repeating-linear-gradient(
+    135deg, transparent, transparent 7px,
+    rgba(255, 255, 255, 0.018) 7px, rgba(255, 255, 255, 0.018) 14px);
+}
+
+.advisory-chip {
+  margin-right: 0.5rem;
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.voidbox {
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
+  padding: 0.75rem 1rem;
+  margin-top: 0.75rem;
+}
+
+.voidbox-h { margin: 0 0 0.4rem; color: var(--ink); font-size: 0.8125rem; }
+.voidbox-p { margin: 0 0 0.4rem; color: var(--ink-dim); font-size: 0.75rem; line-height: 1.55; }
+.voidbox-p:last-child { margin-bottom: 0; }
+
+.shapewarn {
+  border: 1px solid var(--fail);
+  border-left-width: 3px;
+  border-radius: 3px;
+  padding: 0.75rem 1rem;
+  background: rgba(255, 92, 106, 0.06);
+}
+
+.shapewarn-line { margin: 0 0 0.5rem; color: var(--ink); font-size: 0.8125rem; line-height: 1.5; }
+.shapewarn-line:last-of-type { margin-bottom: 0.75rem; }
+.shapewarn-foot { margin: 0; color: var(--ink-dim); font-size: 0.75rem; }
+
+.reasons {
+  margin: 0; padding-left: 1.1rem;
+  color: var(--ink-dim); font-size: 0.8125rem; line-height: 1.6;
+}
+
+.rowcap {
+  margin: 0.5rem 0 0; padding: 0.5rem 0.75rem;
+  border-left: 2px solid var(--warn);
+  color: var(--ink-dim); font-size: 0.75rem;
+}
+
+.hint {
+  margin: 0.5rem 0 0; color: var(--ink-faint); font-size: 0.75rem;
+  text-align: left;
+}
+
+.samples { margin-top: 2rem; color: var(--ink-dim); font-size: 0.8125rem; }
+.samples .controls { justify-content: flex-start; margin-top: 0.5rem; }
+
+/* ---- problem panel ----------------------------------------------------- */
+
+.problem {
+  border: 1px solid var(--fail);
+  border-left-width: 3px;
+  border-radius: var(--r);
+  background: color-mix(in oklab, var(--fail) 8%, var(--panel));
+  padding: 1rem 1.15rem;
+  margin: 1.5rem 0 0;
+}
+.problem h3 { margin: 0 0 0.4rem; font-size: 0.9375rem; }
+.problem p { margin: 0 0 0.5rem; }
+.problem :last-child { margin-bottom: 0; }
+.problem code { color: var(--unknown); }
+
+/* ---- verdict band (the signature) -------------------------------------- */
+
+.band {
+  margin: 2rem 0 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+.band-face {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1.5rem;
+  padding: 1.25rem 1.5rem;
+  border-left: 4px solid var(--void);
+}
+.band-verdict {
+  font-size: clamp(1.75rem, 6vw, 2.75rem);
+  font-weight: 700; letter-spacing: -0.04em; line-height: 1;
+  margin: 0;
+}
+.band-note { margin: 0; color: var(--ink-dim); max-width: 42rem; }
+.band-kind {
+  margin-left: auto; text-align: right;
+  color: var(--ink-faint); font-size: 0.75rem; letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.band[data-verdict="pass"] .band-face { border-left-color: var(--pass); }
+.band[data-verdict="pass"] .band-verdict { color: var(--pass); }
+.band[data-verdict="fail"] .band-face { border-left-color: var(--fail); }
+.band[data-verdict="fail"] .band-verdict { color: var(--fail); }
+.band[data-verdict="inconclusive"] .band-face {
+  border-left-color: var(--unknown);
+  background-image: var(--hatch-unknown);
+}
+.band[data-verdict="inconclusive"] .band-verdict { color: var(--unknown); }
+
+/* ---- tabs -------------------------------------------------------------- */
+
+nav.tabs {
+  display: flex; flex-wrap: wrap; gap: 0.25rem;
+  margin: 1.5rem 0 0; padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+.tab {
+  font: inherit; background: none; border: 1px solid transparent;
+  border-radius: var(--r); color: var(--ink-faint);
+  padding: 0.3rem 0.7rem; cursor: pointer;
+}
+.tab[aria-selected="true"] {
+  color: var(--ink); background: var(--panel); border-color: var(--line);
+}
+.tab .badge {
+  display: inline-block; margin-left: 0.4rem; padding: 0 0.3rem;
+  border-radius: 0.6rem; font-size: 0.7rem;
+  background: var(--line); color: var(--ink-dim);
+}
+
+.panel { padding: 1.5rem 0 0; }
+.panel[hidden] { display: none; }
+
+h3.sec {
+  font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink-faint); margin: 2rem 0 0.75rem;
+  font-weight: 400;
+}
+h3.sec:first-child { margin-top: 0; }
+
+/* ---- data tables ------------------------------------------------------- */
+
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r); }
+table {
+  border-collapse: collapse; width: 100%; font-size: 0.8125rem;
+  /* Fixed layout: without it the browser measures every cell to size columns,
+     which is the dominant paint cost on a report with thousands of rows. */
+  table-layout: fixed;
+}
+td { overflow-wrap: anywhere; }
+th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--line-soft); }
+th {
+  color: var(--ink-faint); font-weight: 400; font-size: 0.7rem;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  background: var(--panel);
+}
+tbody tr:last-child :is(td, th) { border-bottom: 0; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* The three epistemic states, as visual primitives. */
+.v-measured { color: var(--ink); }
+.v-void {
+  color: var(--ink-faint); font-style: italic;
+  background-image: var(--hatch-void);
+}
+.v-unverified {
+  color: var(--unknown);
+  background-image: var(--hatch-unknown);
+}
+.v-over { color: var(--fail); font-weight: 700; }
+.v-ok { color: var(--pass); }
+
+.chip {
+  display: inline-block; padding: 0 0.4rem; border-radius: 0.6rem;
+  font-size: 0.7rem; letter-spacing: 0.04em; border: 1px solid;
+}
+.chip.ok { color: var(--pass); border-color: color-mix(in oklab, var(--pass) 45%, transparent); }
+.chip.bad { color: var(--fail); border-color: color-mix(in oklab, var(--fail) 45%, transparent); }
+.chip.unk { color: var(--unknown); border-color: color-mix(in oklab, var(--unknown) 45%, transparent); }
+.chip.void { color: var(--ink-faint); border-color: var(--line); }
+
+/* ---- attribution bars -------------------------------------------------- */
+
+.attrib { display: grid; gap: 0.4rem; }
+.attrib-row {
+  display: grid; grid-template-columns: minmax(6rem, 10rem) 1fr auto;
+  align-items: center; gap: 0.75rem;
+}
+.attrib-name { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; }
+.attrib-name.unattributed { color: var(--unknown); }
+.attrib-track {
+  position: relative; height: 1.35rem;
+  background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--r);
+  overflow: hidden;
+}
+.attrib-seg { position: absolute; top: 0; bottom: 0; }
+.seg-minor { background: color-mix(in oklab, var(--accent) 55%, transparent); }
+.seg-major { background: var(--fail); }
+.seg-incremental { background: color-mix(in oklab, var(--unknown) 60%, transparent); }
+.seg-weakcb { background: var(--ink-faint); }
+.attrib-val { font-variant-numeric: tabular-nums; color: var(--ink-dim); font-size: 0.75rem; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 0.9rem; margin-top: 0.9rem; font-size: 0.75rem; color: var(--ink-dim); }
+.legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
+.swatch { width: 0.7rem; height: 0.7rem; border-radius: 2px; display: inline-block; }
+
+.region-depth { padding-left: 1.1rem; position: relative; }
+.region-depth::before {
+  content: ""; position: absolute; left: 0.3rem; top: 0; bottom: 50%;
+  border-left: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  width: 0.5rem;
+}
+
+/* ---- frame-time scale -------------------------------------------------- */
+
+.scale { border: 1px solid var(--line); border-radius: var(--r); padding: 1.25rem 1rem 0.75rem; background: var(--panel); }
+.scale-track { position: relative; height: 2.5rem; }
+.scale-axis { position: absolute; left: 0; right: 0; top: 1.35rem; border-top: 1px solid var(--line); }
+.scale-budget { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--pass); }
+.scale-budget span { position: absolute; top: -1.1rem; left: 0.25rem; font-size: 0.7rem; color: var(--pass); white-space: nowrap; }
+.scale-mark { position: absolute; top: 0.55rem; transform: translateX(-50%); text-align: center; }
+.scale-mark i { display: block; width: 1px; height: 0.8rem; background: var(--ink); margin: 0 auto; }
+.scale-mark b { font-size: 0.7rem; font-weight: 400; color: var(--ink-dim); display: block; margin-top: 0.15rem; white-space: nowrap; }
+.scale-mark.over i, .scale-mark.over b { background: var(--fail); color: var(--fail); }
+.scale-mark.over i { background: var(--fail); }
+
+/* ---- compare ----------------------------------------------------------- */
+
+.slots { display: grid; gap: var(--gap); grid-template-columns: 1fr 1fr; }
+.slot {
+  border: 1px dashed var(--line); border-radius: var(--r);
+  background: var(--panel); padding: 1rem; text-align: center;
+}
+.slot.armed { border-color: var(--accent); }
+.slot.filled { border-style: solid; text-align: left; }
+.slot h4 { margin: 0 0 0.35rem; font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); font-weight: 400; }
+.slot p { margin: 0; color: var(--ink-dim); font-size: 0.8125rem; }
+
+.delta-better { color: var(--pass); }
+.delta-worse { color: var(--fail); }
+.delta-same { color: var(--ink-faint); }
+
+/* ---- raw --------------------------------------------------------------- */
+
+pre.raw {
+  margin: 0; padding: 1rem; overflow: auto; max-height: 34rem;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
+  font-size: 0.75rem; line-height: 1.5; color: var(--ink-dim);
+}
+
+/* ---- footer ------------------------------------------------------------ */
+
+.provenance {
+  display: flex; flex-wrap: wrap; gap: 0.4rem 1.5rem;
+  margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--line);
+  color: var(--ink-faint); font-size: 0.75rem;
+}
+.provenance b { color: var(--ink-dim); font-weight: 400; }
+
+.sitefoot {
+  margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
+  color: var(--ink-faint); font-size: 0.75rem;
+  display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem;
+}
+
+.note {
+  border-left: 2px solid var(--line);
+  padding: 0.15rem 0 0.15rem 0.85rem;
+  color: var(--ink-dim);
+  margin: 0.75rem 0 0;
+}
+
+.toast {
+  position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%);
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r);
+  padding: 0.55rem 1rem; color: var(--ink);
+  box-shadow: 0 0.5rem 2rem #0006;
+  transition: opacity 160ms;
+}
+.toast[hidden] { display: none; }
+
+@media (max-width: 40rem) {
+  body { padding: 0 0.9rem 4rem; }
+  .slots { grid-template-columns: 1fr; }
+  .attrib-row { grid-template-columns: 1fr; gap: 0.2rem; }
+  .band-kind { margin-left: 0; text-align: left; }
+  .masthead .privacy { margin-left: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+/* ---- ReflowForge additions -------------------------------------------- */
+
+.sample-hint {
+  margin-top: 1.5rem; color: var(--ink-faint); font-size: 0.8125rem;
+  display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline;
+}
+.link-btn {
+  background: none; border: 0; padding: 0; color: var(--accent);
+  cursor: pointer; font: inherit; text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+.band-meta { margin: 0.35rem 0 0; color: var(--ink-faint); font-size: 0.75rem; }
+.foot-copy { color: var(--ink-faint); font-size: 0.75rem; margin-top: 0.35rem; }
+
+.statgrid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  gap: 1px; background: var(--line-soft);
+  border: 1px solid var(--line-soft); border-radius: 3px; overflow: hidden;
+}
+.stat { background: var(--panel); padding: 0.75rem 0.9rem; }
+.stat-k { color: var(--ink-faint); font-size: 0.7rem; letter-spacing: 0.06em; text-transform: uppercase; }
+.stat-v { font-size: 1.35rem; font-variant-numeric: tabular-nums; margin-top: 0.15rem; }
+.stat-v.accent { color: var(--accent); }
+.stat-v.bad { color: var(--fail); }
+.stat-sub { color: var(--ink-dim); font-size: 0.75rem; margin-top: 0.1rem; }
+
+.viol-list { list-style: none; padding: 0; margin: 0; }
+.viol {
+  border: 1px solid var(--line-soft); border-radius: 3px;
+  padding: 0.65rem 0.85rem; margin-bottom: 0.5rem; background: var(--panel);
+}
+.viol-metric { color: var(--fail); font-weight: 700; }
+.viol-nums { color: var(--ink-dim); font-size: 0.8125rem; margin-left: 0.5rem; }
+.viol-reason { color: var(--ink); margin-top: 0.25rem; font-size: 0.8125rem; overflow-wrap: anywhere; }
+
+.mismatch {
+  border: 1px solid color-mix(in oklab, var(--unknown) 45%, transparent);
+  background: color-mix(in oklab, var(--unknown) 8%, var(--panel));
+  border-radius: 3px; padding: 0.6rem 0.85rem; margin: 1rem 0;
+  color: var(--ink); font-size: 0.8125rem;
+}
+
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <h1 class="wordmark">Reflow<b>Forge</b></h1>
+  <p class="tagline">viewer for lite-layout-profiler reports</p>
+  <p class="privacy">Runs entirely in your browser. Nothing is uploaded.</p>
+</header>
+
+<main>
+
+<section id="intake">
+  <div class="dropzone" id="drop">
+    <h2>Drop a layout.json report</h2>
+    <p>Or open a file, paste JSON, or fetch a URL. A report comes from
+       <code>formatJson</code> or <code>lite-layout-gate --json</code>.</p>
+    <div class="controls">
+      <button class="primary" id="btn-open">Choose a file</button>
+      <button id="btn-paste-toggle">Paste JSON</button>
+    </div>
+    <div class="intake-row">
+      <input type="url" id="url-input" placeholder="https://raw.githubusercontent.com/.../layout.json" aria-label="Report URL">
+      <button id="btn-fetch">Fetch</button>
+    </div>
+    <details class="paste" id="paste-wrap">
+      <summary>Paste JSON</summary>
+      <textarea id="paste-area" placeholder="Paste a lite-layout-profiler report from formatJson or lite-layout-gate --json. Not a summary (gate it first), and not a lite-gc-profiler report (that is GCForge)." spellcheck="false" aria-label="Paste report JSON"></textarea>
+      <div class="controls controls--start">
+        <button id="btn-paste-load">Read it</button>
+      </div>
+    </details>
+    <input type="file" id="file-input" accept=".json,application/json" hidden>
+  </div>
+
+  <div id="problem" class="problem" hidden></div>
+
+  <div class="sample-hint">
+    <span>No report handy?</span>
+    <button class="link-btn" id="btn-sample-pass">Load a passing example</button>
+    <button class="link-btn" id="btn-sample-fail">a failing one</button>
+    <button class="link-btn" id="btn-sample-inc">an inconclusive one</button>
+  </div>
+</section>
+
+<section id="report" hidden>
+  <div class="band" id="band" data-verdict="">
+    <div class="band-main">
+      <p class="band-verdict" id="band-verdict">--</p>
+      <p class="band-note" id="band-note"></p>
+      <p class="band-meta" id="band-meta"></p>
+    </div>
+  </div>
+
+  <div id="panels"></div>
+
+  <div class="controls controls--start-lg">
+    <button id="btn-share">Copy shareable link</button>
+    <button id="btn-copy">Copy JSON</button>
+    <button id="btn-reset">Read another report</button>
+  </div>
+</section>
+
+</main>
+
+<footer class="sitefoot">
+  <p>ReflowForge reads <code>lite-layout-report/1</code>. Report-only: it renders
+     what the gate produced, it does not run the profiler.</p>
+  <p class="foot-copy">Copyright (c) 2026 Zahary Shinikchiev. MIT License.</p>
+</footer>
+
+</div>
+
+<script type="application/json" id="sample-pass">{"schema":"lite-layout-report/1","version":"1.7.0","generatedAt":"2026-07-31T00:00:00.000Z","verdict":"pass","report":{"ok":true,"verified":true,"total":0,"counted":0,"excluded":0,"excludedBy":{"reads":0,"writes":0,"sites":0,"expected":0},"cost":{"measured":0,"unmeasured":0,"totalMs":0,"maxMs":0},"violations":[]}}</script>
+<script type="application/json" id="sample-fail">{"schema":"lite-layout-report/1","version":"1.7.0","generatedAt":"2026-07-31T00:00:00.000Z","verdict":"fail","report":{"ok":false,"verified":true,"total":5,"counted":4,"excluded":1,"excludedBy":{"reads":0,"writes":0,"sites":1,"expected":0},"cost":{"measured":4,"unmeasured":0,"totalMs":2.84,"maxMs":1.21},"violations":[{"metric":"maxReflows","limit":0,"actual":4,"reason":"maxReflows: 4 forced reflows counted, limit 0"}]}}</script>
+<script type="application/json" id="sample-inc">{"schema":"lite-layout-report/1","version":"1.7.0","generatedAt":"2026-07-31T00:00:00.000Z","verdict":"inconclusive","report":{"ok":false,"verified":false,"total":0,"counted":0,"excluded":0,"excludedBy":{"reads":0,"writes":0,"sites":0,"expected":0},"cost":null,"violations":[{"metric":"patched","reason":"patch coverage incomplete: a reflow could travel an un-instrumented path"}]}}</script>
+<script type="module">
+'use strict';
+
+// ReflowForge -- a browser-only viewer for lite-layout-profiler reports.
+// Reads a lite-layout-report/1 envelope (what formatJson emits) and renders the
+// verdict, tallies, violations, and cost. Report-only, fail-closed: it renders
+// what the gate produced and rejects anything that is not a layout report,
+// naming the two look-alikes (a summary, a gc report) precisely.
+
+// ---- classification -----------------------------------------------------
+
+class ReportError extends Error {
+  constructor(code, detail) {
+    super(code);
+    this.name = 'ReportError';
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+function parseDocument(text) {
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (e) {
+    throw new ReportError('not_json', e.message);
+  }
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
+    throw new ReportError('not_object', Array.isArray(doc) ? 'a JSON array' : 'a JSON ' + typeof doc);
+  }
+  return doc;
+}
+
+// Derive the verdict from the report booleans. verified must be EXACTLY true for
+// a definitive verdict; anything else is inconclusive -- the same fail-closed
+// rule the library's _verdictOf uses, reproduced here so the viewer never trusts
+// a stated verdict over the booleans.
+function deriveVerdict(report) {
+  if (!report || typeof report !== 'object') return 'inconclusive';
+  if (report.verified !== true) return 'inconclusive';
+  return report.ok === false ? 'fail' : 'pass';
+}
+
+function identify(doc) {
+  const outerSchema = typeof doc.schema === 'string' ? doc.schema : null;
+
+  // The happy path: a lite-layout-report/1 envelope with a report body.
+  if (outerSchema === 'lite-layout-report/1' && doc.report && typeof doc.report === 'object') {
+    return {
+      envelope: { schema: outerSchema, version: doc.version, generatedAt: doc.generatedAt, verdict: doc.verdict },
+      report: doc.report
+    };
+  }
+
+  // A bare checkNoReflow report: no envelope, but the gate booleans and a
+  // violations array. Accept it -- some users serialise the raw result.
+  if (typeof doc.ok === 'boolean' && typeof doc.verified === 'boolean' && Array.isArray(doc.violations)) {
+    return { envelope: null, report: doc };
+  }
+
+  // A gc-profiler report: real, but GCForge's document, not this one.
+  if (outerSchema && outerSchema.indexOf('lite-gc') === 0) {
+    throw new ReportError('wrong_tool', outerSchema);
+  }
+
+  // A layout SUMMARY (profiler.summary()): has patched/byRead/records, but no
+  // gate booleans. A real artifact -- name it and redirect.
+  if (doc.patched !== undefined || doc.byRead !== undefined || doc.records !== undefined) {
+    throw new ReportError('summary', null);
+  }
+
+  const keys = Object.keys(doc).slice(0, 6).join(', ');
+  throw new ReportError('unrecognised', keys ? 'top-level keys: ' + keys : 'an empty object');
+}
+
+// ---- problem copy -------------------------------------------------------
+
+const PROBLEM_COPY = {
+  not_json: function (d) {
+    return { h: 'That is not JSON', p: 'The text could not be parsed as JSON.', hint: 'Paste the contents of a layout.json file, not a screenshot or a log line. (' + d + ')' };
+  },
+  not_object: function (d) {
+    return { h: 'Not a report object', p: 'The JSON parsed to ' + d + ', not an object.', hint: 'A report is a JSON object from formatJson or lite-layout-gate --json.' };
+  },
+  summary: function () {
+    return { h: 'That is a summary, not a report', p: 'This looks like a profiler.summary() -- it has the recording data but no verdict.', hint: 'Gate it first: checkNoReflow(summary, rules), then serialise with formatJson. A summary has no verdict until rules are applied.' };
+  },
+  wrong_tool: function (d) {
+    return { h: 'That is a lite-gc-profiler report', p: 'The document declares schema "' + d + '", which is a garbage-collection report.', hint: 'Open it in GCForge. ReflowForge reads lite-layout-report/1.' };
+  },
+  unrecognised: function (d) {
+    return { h: 'Unrecognised document', p: 'No lite-layout-report/1 schema and no gate booleans. Found ' + d + '.', hint: 'Reports come from formatJson(report) or the --json flag on lite-layout-gate.' };
+  }
+};
+
+// ---- rendering ----------------------------------------------------------
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function fmtMs(ms) {
+  if (typeof ms !== 'number' || !isFinite(ms)) return '--';
+  if (ms === 0) return '0 ms';
+  if (ms < 1) return ms.toFixed(3) + ' ms';
+  return ms.toFixed(2) + ' ms';
+}
+
+function renderBand(ident) {
+  const stated = ident.envelope ? ident.envelope.verdict : undefined;
+  const derived = deriveVerdict(ident.report);
+  const verdict = derived; // fail-closed: the derived verdict wins.
+
+  $band.dataset.verdict = verdict;
+  $bandVerdict.textContent = verdict.toUpperCase();
+
+  const notes = {
+    pass: 'No forced reflow exceeded the budget, and the run was verified.',
+    fail: 'A budget was breached: one or more forced reflows over the limit.',
+    inconclusive: 'The run could not be verified, so no pass or fail can be claimed.'
+  };
+  $bandNote.textContent = notes[verdict] || '';
+
+  const meta = [];
+  if (ident.envelope && ident.envelope.version) meta.push('lite-layout-profiler ' + ident.envelope.version);
+  if (ident.envelope && ident.envelope.generatedAt) meta.push('generated ' + ident.envelope.generatedAt);
+  $bandMeta.textContent = meta.join('  \u00b7  ');
+
+  // If the envelope stated a verdict that disagrees with the booleans, say so.
+  const mismatchStated = (typeof stated === 'string' && stated !== derived);
+  return mismatchStated ? stated : null;
+}
+
+function statBlock(k, v, sub, cls) {
+  const b = el('div', 'stat');
+  b.appendChild(el('div', 'stat-k', k));
+  b.appendChild(el('div', 'stat-v' + (cls ? ' ' + cls : ''), String(v)));
+  if (sub) b.appendChild(el('div', 'stat-sub', sub));
+  return b;
+}
+
+function renderPanels(ident, statedMismatch) {
+  const r = ident.report;
+  $panels.textContent = '';
+
+  if (statedMismatch) {
+    const m = el('div', 'mismatch');
+    m.textContent = 'The envelope states verdict "' + statedMismatch + '", but the report\u2019s ' +
+      'ok/verified booleans derive "' + deriveVerdict(r) + '". ReflowForge shows the derived ' +
+      'verdict -- the booleans are the source of truth.';
+    $panels.appendChild(m);
+  }
+
+  // Tallies.
+  const tally = el('div', 'panel');
+  tally.appendChild(sectionHead('Tallies'));
+  const grid = el('div', 'statgrid');
+  grid.appendChild(statBlock('counted', num(r.counted), 'reflows that count', r.counted > 0 ? 'bad' : 'accent'));
+  grid.appendChild(statBlock('total', num(r.total), 'recorded'));
+  grid.appendChild(statBlock('excluded', num(r.excluded), 'by rules'));
+  tally.appendChild(grid);
+
+  if (r.excluded > 0 && r.excludedBy && typeof r.excludedBy === 'object') {
+    const eb = r.excludedBy;
+    const sub = el('p', 'stat-sub');
+    sub.style.setProperty('--m', '0');
+    sub.textContent = 'excluded by -- reads: ' + num(eb.reads) + ', writes: ' + num(eb.writes) +
+      ', sites: ' + num(eb.sites) + ', expected: ' + num(eb.expected);
+    tally.appendChild(sub);
+  }
+  $panels.appendChild(tally);
+
+  // Violations.
+  const vp = el('div', 'panel');
+  vp.appendChild(sectionHead('Violations'));
+  const vs = Array.isArray(r.violations) ? r.violations : [];
+  if (vs.length === 0) {
+    vp.appendChild(el('p', 'stat-sub', deriveVerdict(r) === 'pass'
+      ? 'None. Every counted reflow was within budget.'
+      : 'None listed.'));
+  } else {
+    const list = el('ul', 'viol-list');
+    for (let i = 0; i < vs.length; i++) {
+      const v = vs[i];
+      const li = el('li', 'viol');
+      if (v === null || typeof v !== 'object') {
+        li.appendChild(el('div', 'viol-reason', '(malformed violation entry)'));
+        list.appendChild(li);
+        continue;
+      }
+      const head = el('div');
+      head.appendChild(el('span', 'viol-metric', v.metric || '?'));
+      if (v.limit !== undefined || v.actual !== undefined) {
+        head.appendChild(el('span', 'viol-nums',
+          'limit ' + (v.limit === undefined ? '?' : v.limit) + ', actual ' + (v.actual === undefined ? '?' : v.actual)));
+      }
+      li.appendChild(head);
+      li.appendChild(el('div', 'viol-reason', v.reason || '(no reason given)'));
+      list.appendChild(li);
+    }
+    vp.appendChild(list);
+  }
+  $panels.appendChild(vp);
+
+  // Cost.
+  const cp = el('div', 'panel');
+  cp.appendChild(sectionHead('Cost'));
+  if (r.cost && typeof r.cost === 'object') {
+    const c = r.cost;
+    const cg = el('div', 'statgrid');
+    cg.appendChild(statBlock('measured', num(c.measured), 'reflows timed'));
+    cg.appendChild(statBlock('unmeasured', num(c.unmeasured), 'not timed'));
+    cg.appendChild(statBlock('total', fmtMs(c.totalMs), 'summed'));
+    cg.appendChild(statBlock('max', fmtMs(c.maxMs), 'single worst'));
+    cp.appendChild(cg);
+  } else {
+    cp.appendChild(el('p', 'stat-sub', 'Cost not measured (measureCost was off for this run).'));
+  }
+  $panels.appendChild(cp);
+
+  // Coverage -- only if a caller attached patched to the report (the envelope
+  // does not carry it; it lives on the summary). Never invent it.
+  if (r.patched && typeof r.patched === 'object') {
+    const pp = el('div', 'panel');
+    pp.appendChild(sectionHead('Coverage'));
+    const p = r.patched;
+    const pg = el('div', 'statgrid');
+    pg.appendChild(statBlock('applied', num(p.applied), 'targets'));
+    pg.appendChild(statBlock('failed', num(p.failed), 'holes', p.failed > 0 ? 'bad' : ''));
+    pg.appendChild(statBlock('realms', num(p.realms), p.realms > 1 ? 'cross-realm' : 'main only', p.realms > 1 ? 'accent' : ''));
+    pg.appendChild(statBlock('complete', p.complete ? 'yes' : 'no', '', p.complete ? '' : 'bad'));
+    pp.appendChild(pg);
+    if (Array.isArray(p.failures) && p.failures.length > 0) {
+      pp.appendChild(el('p', 'stat-sub', 'failures: ' + p.failures.join(', ')));
+    }
+    $panels.appendChild(pp);
+  }
+}
+
+function num(n) {
+  return typeof n === 'number' && isFinite(n) ? String(n) : '--';
+}
+
+function sectionHead(text) {
+  const h = el('h3', 'sec', text);
+  return h;
+}
+
+function render(ident, sourceText) {
+  const statedMismatch = renderBand(ident);
+  renderPanels(ident, statedMismatch);
+  lastJson = sourceText;
+  $intake.hidden = true;
+  $report.hidden = false;
+  clearProblem();
+  window.scrollTo(0, 0);
+}
+
+// ---- problem display ----------------------------------------------------
+
+function showProblem(code, detail) {
+  const make = PROBLEM_COPY[code] || function () { return { h: 'Could not read the report', p: code, hint: '' }; };
+  const c = make(detail);
+  $problem.textContent = '';
+  $problem.appendChild(el('h3', 'problem-h', c.h));
+  $problem.appendChild(el('p', 'problem-p', c.p));
+  if (c.hint) $problem.appendChild(el('p', 'problem-hint', c.hint));
+  $problem.hidden = false;
+}
+function clearProblem() { $problem.hidden = true; $problem.textContent = ''; }
+
+// ---- load flow ----------------------------------------------------------
+
+let lastJson = '';
+
+function load(text) {
+  let doc, ident;
+  try {
+    doc = parseDocument(text);
+    ident = identify(doc);
+  } catch (e) {
+    if (e instanceof ReportError) { showProblem(e.code, e.detail); return; }
+    showProblem('unrecognised', e.message);
+    return;
+  }
+  render(ident, text);
+}
+
+// ---- DOM refs (cached at init) ------------------------------------------
+
+const $intake = document.getElementById('intake');
+const $report = document.getElementById('report');
+const $problem = document.getElementById('problem');
+const $drop = document.getElementById('drop');
+const $fileInput = document.getElementById('file-input');
+const $btnOpen = document.getElementById('btn-open');
+const $btnPasteToggle = document.getElementById('btn-paste-toggle');
+const $pasteWrap = document.getElementById('paste-wrap');
+const $pasteArea = document.getElementById('paste-area');
+const $btnPasteLoad = document.getElementById('btn-paste-load');
+const $urlInput = document.getElementById('url-input');
+const $btnFetch = document.getElementById('btn-fetch');
+const $band = document.getElementById('band');
+const $bandVerdict = document.getElementById('band-verdict');
+const $bandNote = document.getElementById('band-note');
+const $bandMeta = document.getElementById('band-meta');
+const $panels = document.getElementById('panels');
+const $btnShare = document.getElementById('btn-share');
+const $btnCopy = document.getElementById('btn-copy');
+const $btnReset = document.getElementById('btn-reset');
+const $btnSamplePass = document.getElementById('btn-sample-pass');
+const $btnSampleFail = document.getElementById('btn-sample-fail');
+const $btnSampleInc = document.getElementById('btn-sample-inc');
+
+// ---- intake wiring ------------------------------------------------------
+
+$btnOpen.addEventListener('click', function () { $fileInput.click(); });
+$fileInput.addEventListener('change', function () {
+  const f = $fileInput.files && $fileInput.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = function () { load(String(reader.result)); };
+  reader.onerror = function () { showProblem('not_json', 'the file could not be read'); };
+  reader.readAsText(f);
+});
+
+$btnPasteToggle.addEventListener('click', function () { $pasteWrap.open = !$pasteWrap.open; });
+$btnPasteLoad.addEventListener('click', function () {
+  const t = $pasteArea.value.trim();
+  if (t) load(t);
+});
+
+$btnFetch.addEventListener('click', doFetch);
+$urlInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') doFetch(); });
+function doFetch() {
+  const url = $urlInput.value.trim();
+  if (!url) return;
+  fetch(url).then(function (res) {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.text();
+  }).then(load).catch(function (e) {
+    showProblem('not_json', 'could not fetch: ' + e.message);
+  });
+}
+
+// Drag and drop, with pointer-friendly arming.
+$drop.addEventListener('dragover', function (e) { e.preventDefault(); $drop.classList.add('armed'); });
+$drop.addEventListener('dragleave', function () { $drop.classList.remove('armed'); });
+$drop.addEventListener('drop', function (e) {
+  e.preventDefault();
+  $drop.classList.remove('armed');
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = function () { load(String(reader.result)); };
+  reader.readAsText(f);
+});
+
+// Actions.
+$btnReset.addEventListener('click', function () {
+  $report.hidden = true;
+  $intake.hidden = false;
+  clearProblem();
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+});
+$btnCopy.addEventListener('click', function () {
+  if (lastJson) navigator.clipboard && navigator.clipboard.writeText(lastJson);
+});
+$btnShare.addEventListener('click', function () {
+  if (!lastJson) return;
+  const hash = '#r=' + encodeURIComponent(lastJson);
+  const link = location.origin + location.pathname + hash;
+  if (navigator.clipboard) navigator.clipboard.writeText(link);
+  history.replaceState(null, '', hash);
+});
+
+// Samples.
+function loadSample(id) {
+  const node = document.getElementById(id);
+  if (node) load(node.textContent);
+}
+$btnSamplePass.addEventListener('click', function () { loadSample('sample-pass'); });
+$btnSampleFail.addEventListener('click', function () { loadSample('sample-fail'); });
+$btnSampleInc.addEventListener('click', function () { loadSample('sample-inc'); });
+
+// Deep link: a shared #r= payload loads on open.
+(function () {
+  const m = /[#&]r=([^&]+)/.exec(location.hash);
+  if (m) {
+    try { load(decodeURIComponent(m[1])); } catch (e) { void e; }
+  }
+})();
+
+// Expose the pure functions for testing (extracted and run in Node).
+window.__ReflowForge = { parseDocument, identify, deriveVerdict, ReportError };
+</script>
+</body>
+</html>
