@@ -1,0 +1,63 @@
+{
+  "total": 1,
+  "stored": 1,
+  "patched": {
+    "applied": 28,
+    "failed": 0,
+    "skipped": 5,
+    "realms": 1,
+    "foreign": 0,
+    "complete": true,
+    "provenance": {},
+    "failures": []
+  },
+  "truncated": false,
+  "stacks": true,
+  "byRead": {
+    "offsetWidth": 1
+  },
+  "byWrite": {
+    "Element.setAttribute()": 1
+  },
+  "byTask": {
+    "0": 1
+  },
+  "taskCount": 1,
+  "phases": {
+    "raf": 0,
+    "timer": 0,
+    "microtask": 0,
+    "roCallback": 0,
+    "unknown": 0,
+    "unobserved": 1
+  },
+  "phasesObserved": false,
+  "expected": 0,
+  "thrash": [],
+  "maxThrashCount": 0,
+  "cost": {
+    "resolutionMs": 0.00004099999998175008,
+    "measured": 1,
+    "unmeasured": 0,
+    "totalMs": 0.00008299999998939711,
+    "maxMs": 0.00008299999998939711,
+    "avgMs": 0.00008299999998939711,
+    "p99Ms": 0.00008299999998939711
+  },
+  "records": [
+    {
+      "id": 1,
+      "taskId": 0,
+      "read": "offsetWidth",
+      "write": "Element.setAttribute()",
+      "readSite": "at HTMLDivElement.<anonymous> (file:///Users/zakkster/Work/Portfolio/LiteLibrariesSuite/LiteLayoutProfiler/LayoutProfiler.js:1328:13)",
+      "writeSite": "at HTMLDivElement.<anonymous> (file:///Users/zakkster/Work/Portfolio/LiteLibrariesSuite/LiteLayoutProfiler/LayoutProfiler.js:1456:13)",
+      "phase": "unobserved",
+      "roFeedback": false,
+      "expected": false,
+      "costMs": 0.00008299999998939711,
+      "belowGranularity": false,
+      "timestamp": 221.003542
+    }
+  ]
+}

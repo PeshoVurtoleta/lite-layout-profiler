@@ -611,6 +611,17 @@ export function checkNoReflow(summary, rules) {
                 'summary carries more records (' + records.length + ') than ' +
                 'its own total (' + total + '). The report is internally ' +
                 'inconsistent and cannot be gated.');
+        } else if (totalUsable && records.length < total && summary.truncated !== true) {
+            // Fewer records than the run claims, yet NOT flagged truncated. The
+            // truncated:true case below is the honest, gateable story (the cap
+            // dropped records); this is an inconsistent one -- a short or forged
+            // record set that would let per-record rules undercount into a pass
+            // while `total` still reads high. Refuse it rather than gate on shape.
+            unverifiable(out, 'records',
+                records.length + ' < ' + total,
+                'summary carries fewer records (' + records.length + ') than ' +
+                'its own total (' + total + ') but is not flagged truncated. The ' +
+                'record set is incomplete and cannot be counted over.');
         }
     }
     if (needsRecords && summary.truncated === true) {
@@ -1054,7 +1065,7 @@ export function createLayoutProfiler(options) {
                         failures: ['no DOM in this environment'] },
                     byRead: {}, byWrite: {}, byTask: {}, taskCount: 0,
                     phases: { raf: 0, timer: 0, microtask: 0, roCallback: 0,
-                        event: 0, unknown: 0, unobserved: 0 },
+                        unknown: 0, unobserved: 0 },
                     phasesObserved: false,
                     expected: 0,
                     thrash: [], maxThrashCount: 0,
@@ -1602,6 +1613,7 @@ export function createLayoutProfiler(options) {
         var win = realm.window;
         if (win === undefined) return 'absent';
         var names = ['innerWidth', 'innerHeight', 'scrollX', 'scrollY', 'pageXOffset', 'pageYOffset'];
+        var present = 0, patched = 0;
         for (var i = 0; i < names.length; i++) {
             (function (name) {
                 // Getters may be installed as own-properties or on the
@@ -1615,7 +1627,12 @@ export function createLayoutProfiler(options) {
                         if (desc) target = proto;
                     }
                 }
-                if (!desc || typeof desc.get !== 'function' || !desc.configurable) return;
+                // Absent on this host is not a hole -- nothing flows through a
+                // metric the window does not expose. But a getter that IS present
+                // and refuses instrumentation (non-configurable) is a hole.
+                if (!desc || typeof desc.get !== 'function') return;
+                present++;
+                if (!desc.configurable) return;
                 var originalGet = desc.get;
                 var wm = measuredGet(originalGet, name);
                 Object.defineProperty(target, name, {
@@ -1624,13 +1641,15 @@ export function createLayoutProfiler(options) {
                     enumerable: desc.enumerable,
                     configurable: true
                 });
+                patched++;
                 patches.push(function () {
                     var cur = Object.getOwnPropertyDescriptor(target, name);
                     if (cur && cur.get === wm) Object.defineProperty(target, name, desc);
                 });
             }(names[i]));
         }
-        return true;
+        if (present === 0) return 'absent';
+        return patched === present;
     }
 
     // --- Phase-lane scheduler wrappers (v1.3) ------------------------------
@@ -1835,7 +1854,11 @@ export function createLayoutProfiler(options) {
             }
         });
         if (candidates === 0) return 'absent';
-        return restored.length > 0;
+        // A present setter we could not wrap (non-configurable) is a real hole:
+        // a write through it never dirties, so a later reflow can travel unseen.
+        // Report the group incomplete rather than let one landed setter pass the
+        // whole prototype off as covered.
+        return restored.length === candidates;
     }
 
     // -- Apply all patches --
@@ -2029,10 +2052,13 @@ export function createLayoutProfiler(options) {
         var unmeasured = 0;
         var expectedCount = 0;   // v1.5: recorded reflows that fired in an expected scope
 
-        // Phase counts over the whole run (v1.3).
+        // Phase counts over the whole run (v1.3). No `event` bucket: no scheduler
+        // wrapper ever stamps a reflow `event`, so an always-zero counter here
+        // would read as a measured phase that is simply always clean -- the exact
+        // null-is-not-zero confusion this library refuses elsewhere.
         var phaseCounts = {
             raf: 0, timer: 0, microtask: 0, roCallback: 0,
-            event: 0, unknown: 0, unobserved: 0
+            unknown: 0, unobserved: 0
         };
         // Thrash collapsing: fold identical (read, write, readSite, writeSite,
         // taskId) tuples into one group carrying a count. Keyed by that tuple;

@@ -1,0 +1,33 @@
+{
+  "schema": "lite-layout-report/1",
+  "version": "1.7.0",
+  "generatedAt": "2026-08-03T20:30:43.075Z",
+  "verdict": "fail",
+  "report": {
+    "ok": false,
+    "verified": true,
+    "total": 5,
+    "counted": 5,
+    "excluded": 0,
+    "excludedBy": {
+      "reads": 0,
+      "writes": 0,
+      "sites": 0,
+      "expected": 0
+    },
+    "cost": {
+      "measured": 5,
+      "unmeasured": 0,
+      "totalMs": 41.2,
+      "maxMs": 12.4
+    },
+    "violations": [
+      {
+        "metric": "maxCostMs",
+        "limit": 4,
+        "actual": 12.4,
+        "reason": "maxCostMs: worst forced reflow stalled 12.4 ms, limit 4"
+      }
+    ]
+  }
+}

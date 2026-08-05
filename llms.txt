@@ -1,7 +1,7 @@
 # @zakkster/lite-layout-profiler
 
 Dev-mode forced-reflow detector and budget gate for DOM-binding code.
-Version 1.5.0. Zero dependencies. MIT (c) Zahary Shinikchiev.
+Version 1.7.0. Zero dependencies. MIT (c) Zahary Shinikchiev.
 
 ## What it does
 
@@ -112,7 +112,7 @@ unmeasurable. belowGranularity distinguishes "too fast to time" from
 
 { total, stored, truncated, stacks, byRead, byWrite, byTask, taskCount,
   patched: { applied, failed, skipped, foreign, complete, provenance, failures },
-  phases: { raf, timer, microtask, roCallback, event, unknown, unobserved },
+  phases: { raf, timer, microtask, roCallback, unknown, unobserved },
   phasesObserved,        -- was requestAnimationFrame actually wrapped
   expected,              -- recorded reflows inside a profiler.expected() scope (v1.5)
   thrash: [ { read, write, taskId, phase, count, costMs } ... ],  -- count>1
@@ -281,8 +281,12 @@ Treat the callback like an interrupt handler: record, do not render.
 ## Testing
 
 npm test -- runs test/*.test.mjs and test/torture/*.test.mjs
-205 tests. Main: 01-detect, 02-gate, 03-gate-live, 04-cost, 05-cost-live.
+415 tests (223 main + 192 torture). Main: 01-detect, 02-gate,
+03-gate-live, 04-cost, 05-cost-live, 06-phase, 07-provenance,
+08-expected, 09-report, 10-cli, 11-realm, 12-viewer, 13-coverage-holes,
+14-mocks.
 Torture: l1-5-patching, l2-5-gate-adversarial, l3-5-cost-clock,
-l99-9-extreme -- 105 scenarios across nine axes, see TORTURE.md.
+l4-5-phase, l4-6-provenance, l5-5-expected, l6-5-report-cli, l7-5-realm,
+l99-9-extreme -- adversarial scenarios across nine axes, see TORTURE.md.
 The live suites drive the real patcher against a stub DOM with an
 injected clock, so timer-resolution behaviour is deterministic.

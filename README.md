@@ -310,7 +310,7 @@ not verify a rule (incomplete coverage, a foreign patch) is never a pass.
 ```json
 {
   "schema": "lite-layout-report/1",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "generatedAt": "2026-07-30T00:00:00.000Z",
   "verdict": "fail",
   "report": { "ok": false, "verified": true, "counted": 5, "violations": [ ... ] }
@@ -448,7 +448,7 @@ assertNoReflow(profiler.summary(), {
 
 ```js
 profiler.summary().phases;
-// { raf: 3, timer: 1, microtask: 0, roCallback: 0, event: 0, unknown: 12, unobserved: 0 }
+// { raf: 3, timer: 1, microtask: 0, roCallback: 0, unknown: 12, unobserved: 0 }
 ```
 
 ### Opt-in, and honest when off
@@ -609,11 +609,15 @@ fails as unverifiable on a truncated run.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `maxViolations` | number | 200 | Cap on stored violations |
+| `maxStored` | number | 200 | Cap on retained records (integer 1..1000000) |
+| `maxViolations` | number | 200 | **Deprecated** -- pre-1.1 name for `maxStored`, still honoured |
 | `onViolation` | function | null | Called on each forced reflow |
 | `captureStacks` | boolean | true | Capture call stacks for attribution |
 | `warnToConsole` | boolean | true | Log console.warn per violation |
-| `ignorePatterns` | string[] | [] | Stack frame substrings to ignore |
+| `ignorePatterns` | string[] | [] | Stack frame substrings to ignore at capture time |
+| `measureCost` | boolean | true | Time each reflow and probe the clock floor at init |
+| `clock` | function | `performance.now` | Monotonic ms clock (only adopted when `measureCost` is on) |
+| `phases` | boolean | false | Wrap schedulers to classify each reflow by phase (enables `maxInRaf`) |
 
 ### `LayoutProfiler`
 
@@ -622,21 +626,32 @@ fails as unverifiable on a truncated run.
 | `violations` | Array of recorded violation objects |
 | `violationCount` | Total count (may exceed stored if capped) |
 | `active` | Whether the profiler is active |
-| `destroy()` | Unpatch all prototypes, deactivate |
+| `destroy()` | Unpatch all prototypes (every realm, main last), deactivate |
 | `reset()` | Clear violations, keep profiler active |
-| `summary()` | Aggregate by read property and write source |
+| `summary()` | Serialisable snapshot: the gate's input |
+| `expected(fn)` | Run `fn` with its reflows stamped `expected` (v1.5) |
+| `addRealm(source)` | Instrument an additional realm; returns a removable handle (v1.7) |
 
 ### `Violation`
+
+The record shape carried on `profiler.violations` (stacks) and, without the
+stacks, in `summary().records`:
 
 ```ts
 {
     id: number;
+    taskId: number;         // epoch of the synchronous block this reflow fired in
     read: string;           // 'offsetWidth', 'getBoundingClientRect()', etc.
     write: string;          // 'CSSStyleDeclaration.setProperty()', etc.
     readSite: string;       // parsed call site
     writeSite: string;      // parsed call site
-    readStack: string;      // full Error.stack
-    writeStack: string;
+    readStack: string;      // full Error.stack (omitted from summary().records)
+    writeStack: string;     // "
+    costMs: number | null;  // ms inside the forced layout, or null if unmeasurable
+    belowGranularity: boolean;  // true when the stall did not clear the clock floor
+    phase: string;          // 'raf'|'timer'|'microtask'|'ro-callback'|'unknown'|'unobserved'
+    roFeedback: boolean;    // inside a ResizeObserver callback that had already written
+    expected: boolean;      // fired inside a profiler.expected(fn) region (v1.5)
     timestamp: number;
 }
 ```

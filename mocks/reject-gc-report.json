@@ -1,0 +1,12 @@
+{
+  "schema": "lite-gc-report/1",
+  "version": "1.0.0",
+  "generatedAt": "2026-08-03T00:00:00.000Z",
+  "verdict": "pass",
+  "report": {
+    "ok": true,
+    "verified": true,
+    "kind": "gc",
+    "violations": []
+  }
+}

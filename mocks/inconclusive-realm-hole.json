@@ -1,0 +1,28 @@
+{
+  "schema": "lite-layout-report/1",
+  "version": "1.7.0",
+  "generatedAt": "2026-08-03T20:30:43.064Z",
+  "verdict": "inconclusive",
+  "report": {
+    "ok": false,
+    "verified": false,
+    "total": 0,
+    "counted": 0,
+    "excluded": 0,
+    "excludedBy": {
+      "reads": 0,
+      "writes": 0,
+      "sites": 0,
+      "expected": 0
+    },
+    "cost": null,
+    "violations": [
+      {
+        "metric": "patched",
+        "limit": null,
+        "actual": "1 of 30 failed",
+        "reason": "The profiler could not instrument 1 target on this host, so reflows through those paths were never seen (realm:1.CSSStyleDeclaration.<per-property setters>). A count taken through a torn net is a floor, not a total."
+      }
+    ]
+  }
+}

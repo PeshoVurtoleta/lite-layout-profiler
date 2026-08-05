@@ -1,6 +1,6 @@
 # @zakkster/lite-layout-profiler -- Torture Test Plan
 
-**Status:** 203 torture scenarios shipped across v1.2.0, v1.3.0, v1.4.0,
+**Status:** 192 torture scenarios shipped across v1.2.0, v1.3.0, v1.4.0,
 v1.5.0, v1.6.0, and v1.7.0 (slots L1.5, L2.5, L3.5, L99.9, L4.5, L4.6, L5.5,
 L6.5, L7.5). Axes A-I from v1.2, J-L added in v1.6 for the reporting layer and
 CLI, M-P added in v1.7 for the cross-realm lane; the phase lane (L4.5) reuses

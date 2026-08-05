@@ -14,10 +14,13 @@ Recipes are graded in four tiers:
   animation code, third-party libraries, headless runs, shipping a
   summary out of the browser, keeping the profiler out of its own
   numbers.
-- **Pro (12-17)** -- what to do when a cost budget will not survive a
+- **Pro (12-21)** -- what to do when a cost budget will not survive a
   different browser, gating a run you could only partly record, wiring
   the two profilers into one CI vocabulary, proving the detector was
-  watching at all, and sharing prototypes with another instrumenter.
+  watching at all, sharing prototypes with another instrumenter, excusing
+  a deliberate measurement, gating a captured report with the CLI,
+  catching reflows inside an iframe, and integrating with Vue, React, and
+  Angular.
 
 Read them in order if you are new; jump around if you know what you are
 looking for.
@@ -63,6 +66,10 @@ violation; it is a diagnostic tool, not a runtime dependency.
 15. [Pro: one vocabulary with lite-gc-profiler](#recipe-15-pro-one-vocabulary-with-lite-gc-profiler)
 16. [Pro: proving the detector was actually watching](#recipe-16-pro-proving-the-detector-was-actually-watching)
 17. [Pro: living with another instrumenter](#recipe-17-pro-living-with-another-instrumenter)
+18. [Pro: allowing a deliberate measurement without hiding bugs](#recipe-18-pro-allowing-a-deliberate-measurement-without-hiding-bugs)
+19. [Pro: gating a captured report in CI with the CLI](#recipe-19-pro-gating-a-captured-report-in-ci-with-the-cli)
+20. [Pro: catching reflows inside an iframe](#recipe-20-pro-catching-reflows-inside-an-iframe)
+21. [Integrating with Vue, React, and Angular](#recipe-21-integrating-with-vue-react-and-angular)
 
 ---
 
@@ -315,7 +322,7 @@ maxInRaf: 2 forced reflows inside requestAnimationFrame callbacks
 where the reflows actually live before deciding what to gate:
 
 ```js
-// { raf: 2, timer: 9, microtask: 0, roCallback: 0, event: 0, unknown: 40, unobserved: 0 }
+// { raf: 2, timer: 9, microtask: 0, roCallback: 0, unknown: 40, unobserved: 0 }
 ```
 
 **Gotchas.**
@@ -1112,3 +1119,116 @@ so the gate reports inconclusive rather than a false pass.
   auto-follow navigation -- it would need a lifecycle it cannot own dep-free.
 - **Teardown.** `profiler.destroy()` tears down every realm; you only need
   `handle.remove()` for removing one frame while keeping the rest.
+
+---
+
+## Recipe 21: Integrating with Vue, React, and Angular
+
+**Goal.** Turn the profiler on in your framework's dev build with one import, and
+optionally fail a component test when an interaction forces a reflow.
+
+**The one principle that makes this easy.** The profiler patches global
+prototypes; it is not a component, a plugin, or a hook. So you instrument the
+page ONCE, at the application entry point, before the framework mounts -- not
+per-component. Guard it behind your framework's dev flag and load it with a
+dynamic `import()` so a production build's dead-code elimination drops both the
+call and the module.
+
+Everything below is dependency-free: no framework plugin, no wrapper package.
+
+### Vue (Vite)
+
+`main.ts` -- `import.meta.env.DEV` is statically `false` in a production build,
+so the whole block, and the dynamic import, are tree-shaken out.
+
+```js
+import { createApp } from 'vue';
+import App from './App.vue';
+
+if (import.meta.env.DEV) {
+    import('@zakkster/lite-layout-profiler').then(({ createLayoutProfiler }) => {
+        // Expose it so you can read summary() from the devtools console.
+        window.__reflow = createLayoutProfiler({ phases: true });
+    });
+}
+
+createApp(App).mount('#app');
+```
+
+### React (Vite or Create React App) and Next.js
+
+`index.tsx` (or `app/layout.tsx` / `pages/_app.tsx` for Next). `process.env.NODE_ENV`
+is inlined by every React toolchain, so the guard strips in production.
+
+```js
+import { createRoot } from 'react-dom/client';
+import App from './App';
+
+if (process.env.NODE_ENV !== 'production') {
+    import('@zakkster/lite-layout-profiler').then(({ createLayoutProfiler }) => {
+        window.__reflow = createLayoutProfiler({ phases: true });
+    });
+}
+
+createRoot(document.getElementById('root')).render(<App />);
+```
+
+Next.js runs the entry on the server too, where there is no DOM; the profiler
+detects that and returns an inert no-op profiler (`active: false`), so the guard
+above needs no extra `typeof window` check -- but adding one avoids even the
+dynamic import on the server.
+
+### Angular
+
+`main.ts` -- `isDevMode()` is true only in a non-production build, and Angular's
+production builds strip the branch.
+
+```js
+import { bootstrapApplication } from '@angular/platform-browser';
+import { isDevMode } from '@angular/core';
+import { AppComponent } from './app/app.component';
+import { appConfig } from './app/app.config';
+
+if (isDevMode()) {
+    import('@zakkster/lite-layout-profiler').then(({ createLayoutProfiler }) => {
+        (window as any).__reflow = createLayoutProfiler({ phases: true });
+    });
+}
+
+bootstrapApplication(AppComponent, appConfig);
+```
+
+Zone.js is itself an instrumenter that wraps schedulers, so on an Angular page
+some reflows may be attributed to a Zone frame. That is expected: the profiler's
+provenance lane reports what it can prove and never guesses (see Recipe 17).
+
+### Gating an interaction in a component test
+
+Detection runs in the browser; a component test only forces real layout when it
+runs in a real engine (Playwright / Cypress component testing, or Vitest with the
+`browser` provider). In jsdom/happy-dom the getters do not force layout, so treat
+a Node component test as a smoke test of your instrumentation, and gate the real
+number in a browser test -- the same split the CLI recipe (Recipe 19) describes.
+
+```js
+// A browser-mode component test (Vitest browser / Playwright CT).
+import { createLayoutProfiler, assertNoReflow } from '@zakkster/lite-layout-profiler';
+
+test('opening the menu forces no reflow inside a frame', async () => {
+    const profiler = createLayoutProfiler({ warnToConsole: false, phases: true });
+    try {
+        render(MyMenu);                        // your framework's mount helper
+        await user.click(screen.getByRole('button', { name: 'Open' }));
+
+        // Fail the test on any reflow, and specifically any inside rAF.
+        assertNoReflow(profiler.summary(), { maxReflows: 0, maxInRaf: 0 });
+    } finally {
+        profiler.destroy();                    // always unpatch, even on failure
+    }
+});
+```
+
+`assertNoReflow` throws `ReflowBudgetError` on breach, which fails the test with
+the offending read, write, and both call sites attached. Destroy in a `finally`
+so a failing assertion never leaves the prototypes patched for the next test --
+the same hygiene the library's own suite uses.

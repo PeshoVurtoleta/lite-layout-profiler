@@ -121,6 +121,16 @@ test('A: a total smaller than the records it claims to summarise', () => {
     assertAxisA(s, { maxReflows: 99, maxPerTask: 99 }, 'total < records.length');
 });
 
+test('A: a total larger than the records carried, NOT flagged truncated', () => {
+    // The mirror of the case above, and the more dangerous one: a short (or
+    // forged) record set with a high `total` and no truncation flag. Per-record
+    // rules must refuse -- believing the records would undercount the run into a
+    // pass while `total` still reads high. Only truncated:true is a gateable
+    // shortfall; this inconsistency is not.
+    const s = makeSummary([makeRecord()], { total: 100, stored: 1, truncated: false });
+    assertAxisA(s, { maxReflows: 999, maxPerTask: 999 }, 'records < total, untruncated');
+});
+
 test('A: truncated flag set while records look complete', () => {
     // A report edited by hand, or a merge of two runs. Believe the flag.
     const s = makeSummary([makeRecord()], { truncated: true, total: 1, stored: 1 });

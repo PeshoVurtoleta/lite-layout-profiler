@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+Correctness pass over the coverage and gate lanes, plus documentation and a mock
+report corpus. No API additions; the fixes only make the tool refuse to pass a
+run it cannot honestly verify.
+
+### Fixed
+
+- **Grouped patchers no longer fail open.** `patchAllCssSetters` and
+  `patchWindowMetrics` wrap many targets under one coverage slot. A
+  present-but-non-configurable member (a partially frozen `CSSStyleDeclaration`
+  or `Window`) was silently skipped while the slot still reported success, so
+  `patched.complete` stayed `true` over a real hole and the gate could return a
+  definitive **pass**. Both now report the slot incomplete when any present
+  target is refused, exactly as the one-per-slot `ELEMENT_GETTERS` already did.
+- **The gate now refuses a records-fewer-than-total summary.** `checkNoReflow`
+  rejected `records.length > total` and `truncated: true`, but a summary carrying
+  fewer records than its own `total` without the truncation flag slipped through,
+  letting per-record rules (`maxPerTask`, cost, `maxInRaf`) undercount into a
+  pass. It is now unverifiable, matching the truncated case. `maxReflows` still
+  gates, since `total` is kept independently.
+
+### Removed
+
+- **The dead `event` phase bucket.** No scheduler wrapper ever stamped a reflow
+  `event`, so `summary().phases.event` was always `0` -- a measured-looking phase
+  that was never measured. Dropped from the summary, the `ReflowPhase` type, and
+  the docs. Consumers reading `phases.event` now read `undefined`; the phase was
+  never produced, so no real count is lost.
+
+### Docs
+
+- Added COOKBOOK **Recipe 21: Integrating with Vue, React, and Angular** (dev-mode
+  init per framework, and gating an interaction in a component test).
+- Fixed drift: `llms.txt` version and test counts, the README `formatJson`
+  envelope version and its duplicated/stale options and `Violation` tables, the
+  COOKBOOK recipe index, and the `TORTURE.md` scenario count.
+- Added `mocks/` -- a sample `lite-layout-report/1` envelope for every verdict
+  (pass; fail on counts/cost/rAF/thrash; inconclusive on foreign-patch and
+  realm-hole) plus the two viewer look-alikes. Repo-only, excluded from the
+  package like `demo/` and `viewer/`.
+
+### Tests
+
+- `test/13-coverage-holes.test.mjs` -- the two fail-open holes above, plus
+  detection coverage for the previously-untested reads (`getCTM`/`getScreenCTM`,
+  `innerHeight`/`scrollX`/`pageXOffset`/`pageYOffset`, window scroll methods) and
+  `warnToConsole` output.
+- `test/14-mocks.test.mjs` -- drives every `mocks/` envelope through the CLI gate
+  and the viewer classifier, with a shape check against live `formatJson`, so the
+  corpus cannot drift.
+- Added the `records < total, untruncated` adversarial case to the torture suite.
+- Full suite: 415 (223 main + 192 torture).
+
 ## 1.7.0
 
 The cross-realm / iframe lane. Until now every patch bound to the main realm's

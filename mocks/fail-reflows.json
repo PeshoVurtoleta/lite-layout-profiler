@@ -1,0 +1,33 @@
+{
+  "schema": "lite-layout-report/1",
+  "version": "1.7.0",
+  "generatedAt": "2026-08-03T20:30:42.974Z",
+  "verdict": "fail",
+  "report": {
+    "ok": false,
+    "verified": true,
+    "total": 3,
+    "counted": 3,
+    "excluded": 0,
+    "excludedBy": {
+      "reads": 0,
+      "writes": 0,
+      "sites": 0,
+      "expected": 0
+    },
+    "cost": {
+      "measured": 3,
+      "unmeasured": 0,
+      "totalMs": 0.0038339999999976726,
+      "maxMs": 0.00304199999999355
+    },
+    "violations": [
+      {
+        "metric": "maxReflows",
+        "limit": 0,
+        "actual": 3,
+        "reason": "maxReflows: 3 forced reflows counted, limit 0"
+      }
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "schema": "lite-layout-report/1",
+  "version": "1.7.0",
+  "generatedAt": "2026-08-03T20:30:42.998Z",
+  "verdict": "fail",
+  "report": {
+    "ok": false,
+    "verified": true,
+    "total": 25,
+    "counted": 25,
+    "excluded": 0,
+    "excludedBy": {
+      "reads": 0,
+      "writes": 0,
+      "sites": 0,
+      "expected": 0
+    },
+    "cost": {
+      "measured": 25,
+      "unmeasured": 0,
+      "totalMs": 0.0046269999999140055,
+      "maxMs": 0.0006669999999928677
+    },
+    "violations": [
+      {
+        "metric": "maxPerTask",
+        "limit": 1,
+        "actual": 25,
+        "reason": "maxPerTask: task #0 forced 25 reflows in one synchronous block, limit 1"
+      }
+    ]
+  }
+}

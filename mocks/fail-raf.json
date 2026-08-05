@@ -1,0 +1,33 @@
+{
+  "schema": "lite-layout-report/1",
+  "version": "1.7.0",
+  "generatedAt": "2026-08-03T20:30:43.075Z",
+  "verdict": "fail",
+  "report": {
+    "ok": false,
+    "verified": true,
+    "total": 6,
+    "counted": 6,
+    "excluded": 0,
+    "excludedBy": {
+      "reads": 0,
+      "writes": 0,
+      "sites": 0,
+      "expected": 0
+    },
+    "cost": {
+      "measured": 6,
+      "unmeasured": 0,
+      "totalMs": 5.1,
+      "maxMs": 1.4
+    },
+    "violations": [
+      {
+        "metric": "maxInRaf",
+        "limit": 0,
+        "actual": 3,
+        "reason": "maxInRaf: 3 forced reflows inside requestAnimationFrame, limit 0"
+      }
+    ]
+  }
+}

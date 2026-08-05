@@ -34,7 +34,7 @@ export interface Violation {
 /** The scheduler a reflow fired under. 'unobserved' when phases:false; */
 /** 'unknown' when phases:true but no wrapped scheduler was active. */
 export type ReflowPhase =
-    'raf' | 'timer' | 'microtask' | 'ro-callback' | 'event' | 'unknown' | 'unobserved';
+    'raf' | 'timer' | 'microtask' | 'ro-callback' | 'unknown' | 'unobserved';
 
 export interface ViolationRecord {
     id: number;
@@ -64,7 +64,6 @@ export interface PhaseCounts {
     timer: number;
     microtask: number;
     roCallback: number;
-    event: number;
     unknown: number;
     unobserved: number;
 }

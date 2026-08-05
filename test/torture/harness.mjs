@@ -102,7 +102,7 @@ export function makeSummary(records, over) {
     const byRead = {}, byWrite = {}, byTask = {};
     const costs = [];
     let unmeasured = 0;
-    const phases = { raf: 0, timer: 0, microtask: 0, roCallback: 0, event: 0, unknown: 0, unobserved: 0 };
+    const phases = { raf: 0, timer: 0, microtask: 0, roCallback: 0, unknown: 0, unobserved: 0 };
     const groups = new Map();
     for (const r of list) {
         if (r === null || typeof r !== 'object') continue;
